@@ -55,8 +55,11 @@ fn num_of_keys() -> usize {
     100
 }
 
+
+/// 快元素大小为 128,但是快元素数量为 100
 fn generate_sst() -> (TempDir, SsTable) {
     let mut builder = SsTableBuilder::new(128);
+    // 0----->100
     for idx in 0..num_of_keys() {
         let key = key_of(idx);
         let value = value_of(idx);
