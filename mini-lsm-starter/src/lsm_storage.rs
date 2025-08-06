@@ -323,18 +323,32 @@ impl LsmStorageInner {
             }
         }
 
-        let mut l0_iters = Vec::with_capacity(snapshot.l0_sstables.len());
+        let mut iters = Vec::with_capacity(snapshot.l0_sstables.len());
 
         for table in snapshot.l0_sstables.iter() {
-            if let Some(sstable) = snapshot.sstables.get(table) {
-                l0_iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
-                    sstable.clone(),
-                    KeySlice::from_slice(key),
-                )?));
+            let table = snapshot.sstables[table].clone();
+            if key_within(
+                key,
+                table.first_key().as_key_slice(),
+                table.last_key().as_key_slice(),
+            ) {
+                if let Some(bloom) = &table.bloom {
+                    if bloom.may_contain(farmhash::fingerprint32(key)) {
+                        iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
+                            table,
+                            KeySlice::from_slice(key),
+                        )?));
+                    }
+                } else {
+                    iters.push(Box::new(SsTableIterator::create_and_seek_to_key(
+                        table,
+                        KeySlice::from_slice(key),
+                    )?));
+                }
             }
         }
 
-        let iter = MergeIterator::create(l0_iters);
+        let iter = MergeIterator::create(iters);
         if iter.is_valid() && iter.key().raw_ref() == key && !iter.value().is_empty() {
             return Ok(Some(Bytes::copy_from_slice(iter.value())));
         }
