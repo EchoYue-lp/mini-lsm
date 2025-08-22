@@ -81,6 +81,9 @@ impl CompactionController {
         }
     }
 
+    /**
+     * output :新生成的 SST 的id
+     */
     pub fn apply_compaction_result(
         &self,
         snapshot: &LsmStorageState,
@@ -158,6 +161,13 @@ impl LsmStorageInner {
                 lower_level: _,
                 lower_level_sst_ids,
                 ..
+            })
+            | CompactionTask::Leveled(LeveledCompactionTask {
+                upper_level,
+                upper_level_sst_ids,
+                lower_level: _,
+                lower_level_sst_ids,
+                ..
             }) => match upper_level {
                 Some(_) => {
                     let mut upper_ssts = Vec::with_capacity(upper_level_sst_ids.len());
@@ -194,7 +204,20 @@ impl LsmStorageInner {
                     )
                 }
             },
-            _ => unimplemented!(),
+            CompactionTask::Tiered(TieredCompactionTask { tiers, .. }) => {
+                let mut iters = Vec::with_capacity(tiers.len());
+                for (_, tier_sst_ids) in tiers {
+                    let mut ssts = Vec::with_capacity(tier_sst_ids.len());
+                    for id in tier_sst_ids.iter() {
+                        ssts.push(snapshot.sstables.get(id).unwrap().clone());
+                    }
+                    iters.push(Box::new(SstConcatIterator::create_and_seek_to_first(ssts)?));
+                }
+                self.compact_generate_sst_from_iter(
+                    MergeIterator::create(iters),
+                    task.compact_to_bottom_level(),
+                )
+            }
         }
     }
 
@@ -270,7 +293,7 @@ impl LsmStorageInner {
 
         let Some(task) = task else { return Ok(()) };
         self.dump_structure();
-        // println!("running compaction task: {:?}", task);
+        println!("running compaction task: {:?}", task);
 
         // Compact the task and get the new SSTs
         let sstables = self.compact(&task)?;
@@ -302,12 +325,12 @@ impl LsmStorageInner {
             ssts_to_remove
         };
 
-        // println!(
-        //     "compaction finished: {} files removed, {} files added, output={:?}",
-        //     ssts_to_remove.len(),
-        //     output.len(),
-        //     output
-        // );
+        println!(
+            "compaction finished: {} files removed, {} files added, output={:?}",
+            ssts_to_remove.len(),
+            output.len(),
+            output
+        );
 
         for sst in ssts_to_remove {
             std::fs::remove_file(self.path_of_sst(sst.sst_id()))?;

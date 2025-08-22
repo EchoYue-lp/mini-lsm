@@ -505,7 +505,13 @@ impl LsmStorageInner {
             let remove_eme = snapshot.imm_memtables.pop().unwrap();
             assert_eq!(remove_eme.id(), sst_id);
 
-            snapshot.l0_sstables.insert(0, sst_id);
+            if self.compaction_controller.flush_to_l0() {
+                snapshot.l0_sstables.insert(0, sst_id);
+            } else {
+                snapshot.levels.insert(0, (sst_id, vec![sst_id]))
+            }
+
+            println!("flushed {}.sst with size={}", sst_id, sst.table_size());
             snapshot.sstables.insert(sst_id, sst);
             *guard = Arc::new(snapshot);
         }
