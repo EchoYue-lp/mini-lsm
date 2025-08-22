@@ -421,10 +421,11 @@ impl LsmStorageInner {
     }
 
     fn try_freeze(&self, estimated_size: usize) -> Result<()> {
-        if estimated_size >= self.options.num_memtable_limit {
+        if estimated_size >= self.options.target_sst_size {
             let state_lock = self.state_lock.lock();
             let guard = self.state.read();
-            if guard.memtable.approximate_size() >= self.options.num_memtable_limit {
+            // the memtable could have already been frozen, check again to ensure we really need to freeze
+            if guard.memtable.approximate_size() >= self.options.target_sst_size {
                 drop(guard);
                 self.force_freeze_memtable(&state_lock)?;
             }
