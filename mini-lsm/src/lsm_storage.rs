@@ -638,7 +638,6 @@ impl LsmStorageInner {
         *guard = Arc::new(snapshot);
 
         drop(guard);
-        old_memtable.sync_wal()?;
 
         Ok(())
     }
