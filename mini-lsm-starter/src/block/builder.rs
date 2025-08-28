@@ -76,6 +76,8 @@ impl BlockBuilder {
         self.data.put_u16(value.len() as u16);
         self.data.put_slice(value);
 
+        // let hash = crc32fast::hash(&buf);
+
         if self.first_key.is_empty() {
             self.first_key = key.to_key_vec();
         }

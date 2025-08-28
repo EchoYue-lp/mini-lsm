@@ -27,6 +27,7 @@ use anyhow::{Result, anyhow, bail};
 pub use builder::SsTableBuilder;
 use bytes::{Buf, BufMut};
 pub use iterator::SsTableIterator;
+use nom::complete::bool;
 
 use crate::block::Block;
 use crate::key::{KeyBytes, KeySlice};
@@ -58,6 +59,21 @@ impl BlockMeta {
         #[allow(clippy::ptr_arg)] // remove this allow after you finish
         buf: &mut Vec<u8>,
     ) {
+        let mut estimated_size = std::mem::size_of::<u32>();
+        for meta in block_meta {
+            // The size of offset
+            estimated_size += std::mem::size_of::<u32>();
+            // The size of key length
+            estimated_size += std::mem::size_of::<u16>();
+            // The size of actual key
+            estimated_size += meta.first_key.len();
+            // The size of key length
+            estimated_size += std::mem::size_of::<u16>();
+            // The size of actual key
+            estimated_size += meta.last_key.len();
+        }
+        estimated_size += std::mem::size_of::<u32>();
+
         // block 的长度，block包括：(key,value) 和他们的 offset
         let original_len = buf.len();
         buf.put_u32(block_meta.len() as u32);
@@ -68,12 +84,15 @@ impl BlockMeta {
             buf.put_u16(meta.last_key.len() as u16);
             buf.put_slice(meta.last_key.raw_ref());
         }
+        buf.put_u32(crc32fast::hash(&buf[original_len + 4..]));
+        assert_eq!(estimated_size, buf.len() - original_len);
     }
 
     /// Decode block meta from a buffer.
-    pub fn decode_block_meta(mut buf: impl Buf) -> Result<Vec<BlockMeta>> {
+    pub fn decode_block_meta(mut buf: &[u8]) -> Result<Vec<BlockMeta>> {
         let mut block_meta = Vec::new();
         let num = buf.get_u32() as usize;
+        let checksum = crc32fast::hash(&buf[..buf.remaining() - 4]);
         for _ in 0..num {
             let offset = buf.get_u32() as usize;
             let first_key_len = buf.get_u16() as usize;
@@ -85,6 +104,9 @@ impl BlockMeta {
                 first_key,
                 last_key,
             });
+        }
+        if buf.get_u32() != checksum {
+            bail!("meta checksum mismatched");
         }
         Ok(block_meta)
     }
@@ -202,9 +224,15 @@ impl SsTable {
             .block_meta
             .get(block_idx + 1)
             .map_or(self.block_meta_offset, |next| next.offset);
-        let block_len = offset_end - offset;
-        let block_data = self.file.read(offset as u64, block_len as u64)?;
-        let block_data = &block_data[..block_len];
+        let block_len = offset_end - offset - 4;
+        let block_data_with_chksum = self
+            .file
+            .read(offset as u64, (offset_end - offset) as u64)?;
+        let block_data = &block_data_with_chksum[..block_len];
+        let checksum = (&block_data_with_chksum[block_len..]).get_u32();
+        if checksum != crc32fast::hash(block_data) {
+            bail!("block checksum mismatched");
+        }
         Ok(Arc::new(Block::decode(block_data)))
     }
 
