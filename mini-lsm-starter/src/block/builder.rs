@@ -53,8 +53,8 @@ impl BlockBuilder {
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
         assert!(!key.is_empty(), "key must not be empty");
 
-        // 现在已有的长度+Key长度+Value长度+3倍的SIZEOF_U16
-        if self.estimated_size() + key.len() + value.len() + SIZEOF_U16 * 3 /* key_len, value_len and offset */ > self.block_size
+        // 现在已有的长度+Key长度+时间戳+Value长度+3倍的SIZEOF_U16
+        if self.estimated_size() + key.key_len() + value.len() + SIZEOF_U16 * 3 /* key_len, value_len and offset */ > self.block_size
             && !self.is_empty()
         {
             return false;
@@ -67,11 +67,9 @@ impl BlockBuilder {
 
         self.data.put_u16(overlap as u16);
 
-        self.data.put_u16((key.len() - overlap) as u16);
-        self.data.put_slice(&key.raw_ref()[overlap..]);
-
-        // self.data.put_u16(key.len() as u16);
-        // self.data.put_slice(key.raw_ref());
+        self.data.put_u16((key.key_len() - overlap) as u16);
+        self.data.put_slice(&key.key_ref()[overlap..]);
+        self.data.put_u64(key.ts());
 
         self.data.put_u16(value.len() as u16);
         self.data.put_slice(value);
@@ -104,10 +102,10 @@ impl BlockBuilder {
 fn compute_overlap(first_key: KeySlice, key: KeySlice) -> usize {
     let mut i = 0;
     loop {
-        if i >= first_key.len() || i >= key.len() {
+        if i >= first_key.key_len() || i >= key.key_len() {
             break;
         }
-        if first_key.raw_ref()[i] != key.raw_ref()[i] {
+        if first_key.key_ref()[i] != key.key_ref()[i] {
             break;
         }
         i += 1;

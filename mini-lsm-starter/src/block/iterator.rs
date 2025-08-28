@@ -16,7 +16,7 @@ use crate::key::{KeySlice, KeyVec};
 use bytes::Buf;
 use std::sync::Arc;
 
-use super::{Block, SIZEOF_U16};
+use super::{Block, SIZEOF_U16, SIZEOF_U64};
 
 /// Iterates on a block.
 pub struct BlockIterator {
@@ -38,7 +38,9 @@ impl Block {
         buf.get_u16();
         let key_len = buf.get_u16() as usize;
         let key = &buf[..key_len];
-        KeyVec::from_vec(key.to_vec())
+        buf.advance(key_len);
+        let ts = buf.get_u64();
+        KeyVec::from_vec_with_ts(key.to_vec(), ts)
     }
 }
 
@@ -135,14 +137,16 @@ impl BlockIterator {
         let overlap_len = data.get_u16() as usize;
         let key_len = data.get_u16() as usize;
         let key = &data[..key_len];
-
         self.key.clear();
-        self.key.append(&self.first_key.raw_ref()[..overlap_len]);
+        self.key.append(&self.first_key.key_ref()[..overlap_len]);
         self.key.append(key);
         data.advance(key_len);
+        let ts = data.get_u64();
+        self.key.set_ts(ts);
 
         let value_len = data.get_u16() as usize;
-        let value_offset_begin = offset + SIZEOF_U16 + SIZEOF_U16 + key_len + SIZEOF_U16;
+        let value_offset_begin =
+            offset + SIZEOF_U16 + SIZEOF_U64 + SIZEOF_U16 + key_len + SIZEOF_U16;
         let value_offset_end = value_offset_begin + value_len;
         self.value_range = (value_offset_begin, value_offset_end);
         data.advance(value_len);
