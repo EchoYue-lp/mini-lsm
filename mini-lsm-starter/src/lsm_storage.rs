@@ -28,10 +28,11 @@ use crate::iterators::StorageIterator;
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
+use crate::key;
 use crate::key::{KeySlice, TS_RANGE_BEGIN};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
-use crate::mem_table::{MemTable, map_bound};
+use crate::mem_table::{MemTable, map_bound, map_key_bound_plus_ts};
 use crate::mvcc::LsmMvccInner;
 use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 use anyhow::{Context, Result};
@@ -298,6 +299,10 @@ impl LsmStorageInner {
         self.mvcc.as_ref().unwrap()
     }
 
+    pub(crate) fn manifest(&self) -> &Manifest {
+        self.manifest.as_ref().unwrap()
+    }
+
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
@@ -373,7 +378,7 @@ impl LsmStorageInner {
                     table_id,
                     Some(block_cache.clone()),
                     FileObject::open(&Self::path_of_sst_static(path, table_id))
-                        .with_context(|| format!("failed to open SST {}", table_id))?,
+                        .context("failed to open SST")?,
                 )?;
                 state.sstables.insert(table_id, Arc::new(sst));
                 sst_cnt += 1;
@@ -428,7 +433,7 @@ impl LsmStorageInner {
             compaction_controller,
             manifest: Some(manifest),
             options: options.into(),
-            mvcc: None,
+            mvcc: Some(LsmMvccInner::new(0)),
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
         };
         storage.sync_dir()?;
@@ -448,27 +453,27 @@ impl LsmStorageInner {
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         assert!(!key.is_empty(), "key cannot be null");
-        let guard = self.state.read();
-        let snapshot = &guard;
 
-        // search in memtable
-        if let Some(value) = guard.memtable.get(key) {
-            if value.is_empty() {
-                return Ok(None);
-            }
-            return Ok(Some(value));
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        }; // drop global lock here
+
+        let mut memtable_iters = Vec::with_capacity(snapshot.imm_memtables.len() + 1);
+
+        memtable_iters.push(Box::new(snapshot.memtable.scan(
+            Bound::Included(KeySlice::from_slice(key, key::TS_RANGE_BEGIN)),
+            Bound::Included(KeySlice::from_slice(key, key::TS_RANGE_END)),
+        )));
+
+        for memtable in snapshot.imm_memtables.iter() {
+            memtable_iters.push(Box::new(memtable.scan(
+                Bound::Included(KeySlice::from_slice(key, key::TS_RANGE_BEGIN)),
+                Bound::Included(KeySlice::from_slice(key, key::TS_RANGE_END)),
+            )));
         }
 
-        // search in immutable memtables
-
-        for imm_memtable in snapshot.imm_memtables.iter() {
-            if let Some(value) = imm_memtable.get(key) {
-                if value.is_empty() {
-                    return Ok(None);
-                }
-                return Ok(Some(value));
-            }
-        }
+        let memtable_iter = MergeIterator::create(memtable_iters);
 
         let mut l0_iters = Vec::with_capacity(snapshot.l0_sstables.len());
 
@@ -519,9 +524,15 @@ impl LsmStorageInner {
             level_iters.push(Box::new(level_iter));
         }
 
-        let iter = TwoMergeIterator::create(l0_iter, MergeIterator::create(level_iters))?;
+        let iter = LsmIterator::new(
+            TwoMergeIterator::create(
+                TwoMergeIterator::create(memtable_iter, l0_iter)?,
+                MergeIterator::create(level_iters),
+            )?,
+            Bound::Unbounded,
+        )?;
 
-        if iter.is_valid() && iter.key().key_ref() == key && !iter.value().is_empty() {
+        if iter.is_valid() && iter.key() == key && !iter.value().is_empty() {
             return Ok(Some(Bytes::copy_from_slice(iter.value())));
         }
 
@@ -530,6 +541,8 @@ impl LsmStorageInner {
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
     pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+        let _lck = self.mvcc().write_lock.lock();
+        let ts = self.mvcc().latest_commit_ts() + 1;
         for record in batch {
             match record {
                 WriteBatchRecord::Put(key, value) => {
@@ -540,7 +553,7 @@ impl LsmStorageInner {
                     let size;
                     {
                         let mut guard = self.state.read();
-                        guard.memtable.put(key, value);
+                        guard.memtable.put(KeySlice::from_slice(key, ts), value)?;
                         size = guard.memtable.approximate_size();
                     }
                     self.try_freeze(size)?;
@@ -551,13 +564,14 @@ impl LsmStorageInner {
                     let size;
                     {
                         let mut guard = self.state.read();
-                        guard.memtable.put(key, b"");
+                        guard.memtable.put(KeySlice::from_slice(key, ts), b"")?;
                         size = guard.memtable.approximate_size();
                     }
                     self.try_freeze(size)?;
                 }
             }
         }
+        self.mvcc().update_commit_ts(ts);
         Ok(())
     }
 
@@ -633,7 +647,7 @@ impl LsmStorageInner {
 
         self.freeze_memtable_with_memtable(memtable)?;
 
-        self.manifest.as_ref().unwrap().add_record(
+        self.manifest().add_record(
             state_lock_observer,
             ManifestRecord::NewMemtable(memtable_id),
         )?;
@@ -688,9 +702,7 @@ impl LsmStorageInner {
             std::fs::remove_file(self.path_of_wal(sst_id))?;
         }
 
-        self.manifest
-            .as_ref()
-            .unwrap()
+        self.manifest()
             .add_record(&state_lock, ManifestRecord::Flush(sst_id))?;
         self.sync_dir()?;
         Ok(())
@@ -713,10 +725,18 @@ impl LsmStorageInner {
         }; // drop global lock here
 
         let mut memtable_iters = Vec::with_capacity(snapshot.imm_memtables.len() + 1);
-        memtable_iters.push(Box::new(snapshot.memtable.scan(lower, upper)));
+
+        memtable_iters.push(Box::new(snapshot.memtable.scan(
+            map_key_bound_plus_ts(lower, key::TS_RANGE_BEGIN),
+            map_key_bound_plus_ts(upper, key::TS_RANGE_END),
+        )));
         for memtable in snapshot.imm_memtables.iter() {
-            memtable_iters.push(Box::new(memtable.scan(lower, upper)));
+            memtable_iters.push(Box::new(memtable.scan(
+                map_key_bound_plus_ts(lower, key::TS_RANGE_BEGIN),
+                map_key_bound_plus_ts(upper, key::TS_RANGE_END),
+            )));
         }
+
         let memtable_iter = MergeIterator::create(memtable_iters);
 
         let mut table_iters = Vec::with_capacity(snapshot.l0_sstables.len());
