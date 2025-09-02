@@ -12,18 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 pub mod txn;
 pub mod watermark;
 
+use crossbeam_skiplist::SkipMap;
+use parking_lot::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
 };
-
-use parking_lot::Mutex;
 
 use self::{txn::Transaction, watermark::Watermark};
 use crate::lsm_storage::LsmStorageInner;
@@ -67,7 +65,15 @@ impl LsmMvccInner {
         ts.1.watermark().unwrap_or(ts.0)
     }
 
-    pub fn new_txn(&self, inner: Arc<LsmStorageInner>, serializable: bool) -> Arc<Transaction> {
-        unimplemented!()
+    pub fn new_txn(&self, inner: Arc<LsmStorageInner>, _serializable: bool) -> Arc<Transaction> {
+        let ts = self.ts.lock();
+        let read_ts = ts.0;
+        Arc::new(Transaction {
+            inner,
+            read_ts,
+            local_storage: Arc::new(SkipMap::new()),
+            committed: Arc::new(AtomicBool::new(false)),
+            key_hashes: None,
+        })
     }
 }

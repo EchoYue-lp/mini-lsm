@@ -51,7 +51,7 @@ impl BlockMeta {
     /// 编码 block 元数据，现在的 buf 里面已经有了所有的 block data 数据
     /// 接着先写入所有 block data 的长度，然后写入 block meta 的数据
     /// block meta 格式：offset + first_key + last_key
-    pub fn encode_block_meta(block_meta: &[BlockMeta], buf: &mut Vec<u8>) {
+    pub fn encode_block_meta(block_meta: &[BlockMeta], max_ts: u64, buf: &mut Vec<u8>) {
         let mut estimated_size = std::mem::size_of::<u32>();
         for meta in block_meta {
             // The size of offset
@@ -65,7 +65,8 @@ impl BlockMeta {
             // The size of actual key
             estimated_size += meta.last_key.raw_len();
         }
-        estimated_size += std::mem::size_of::<u32>();
+        estimated_size += std::mem::size_of::<u64>(); // max timestamp
+        estimated_size += std::mem::size_of::<u32>(); // checksum
 
         buf.reserve(estimated_size);
         // block 的长度，block包括：(key,value) 和他们的 offset
@@ -80,12 +81,13 @@ impl BlockMeta {
             buf.put_slice(meta.last_key.key_ref());
             buf.put_u64(meta.last_key.ts());
         }
+        buf.put_u64(max_ts);
         buf.put_u32(crc32fast::hash(&buf[original_len + 4..]));
         assert_eq!(estimated_size, buf.len() - original_len);
     }
 
     /// Decode block meta from a buffer.
-    pub fn decode_block_meta(mut buf: &[u8]) -> Result<Vec<BlockMeta>> {
+    pub fn decode_block_meta(mut buf: &[u8]) -> Result<(Vec<BlockMeta>, u64)> {
         let mut block_meta = Vec::new();
         let num = buf.get_u32() as usize;
         let checksum = crc32fast::hash(&buf[..buf.remaining() - 4]);
@@ -103,10 +105,12 @@ impl BlockMeta {
                 last_key,
             });
         }
+        let max_ts = buf.get_u64();
         if buf.get_u32() != checksum {
             bail!("meta checksum mismatched");
         }
-        Ok(block_meta)
+
+        Ok((block_meta, max_ts))
     }
 }
 
@@ -179,7 +183,7 @@ impl SsTable {
         let raw_meta_offset = file.read(bloom_offset - 4, 4)?;
         let block_meta_offset = (&raw_meta_offset[..]).get_u32() as u64;
         let raw_meta = file.read(block_meta_offset, bloom_offset - 4 - block_meta_offset)?;
-        let block_meta = BlockMeta::decode_block_meta(&raw_meta[..])?;
+        let (block_meta, max_ts) = BlockMeta::decode_block_meta(&raw_meta[..])?;
 
         let sst = Self {
             file,
@@ -190,7 +194,7 @@ impl SsTable {
             last_key: block_meta.last().unwrap().last_key.clone(),
             block_meta: block_meta,
             bloom: Some(bloom_filter),
-            max_ts: 0,
+            max_ts,
         };
         Ok(sst)
     }
