@@ -548,9 +548,11 @@ impl LsmStorageInner {
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
-    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+    pub fn write_batch_inner<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<u64> {
         let _lck = self.mvcc().write_lock.lock();
         let ts = self.mvcc().latest_commit_ts() + 1;
+        let mut batch_datas: Vec<(key::Key<&[u8]>, &[u8])> = vec![];
+        let size;
         for record in batch {
             match record {
                 WriteBatchRecord::Put(key, value) => {
@@ -558,28 +560,42 @@ impl LsmStorageInner {
                     let value = value.as_ref();
                     assert!(!key.is_empty(), "key cannot be empty");
                     assert!(!value.is_empty(), "value cannot be empty");
-                    let size;
-                    {
-                        let mut guard = self.state.read();
-                        guard.memtable.put(KeySlice::from_slice(key, ts), value)?;
-                        size = guard.memtable.approximate_size();
-                    }
-                    self.try_freeze(size)?;
+                    batch_datas.push((KeySlice::from_slice(key, ts), value));
                 }
                 WriteBatchRecord::Del(key) => {
                     let key = key.as_ref();
                     assert!(!key.is_empty(), "key cannot be null");
-                    let size;
-                    {
-                        let mut guard = self.state.read();
-                        guard.memtable.put(KeySlice::from_slice(key, ts), b"")?;
-                        size = guard.memtable.approximate_size();
-                    }
-                    self.try_freeze(size)?;
+                    batch_datas.push((KeySlice::from_slice(key, ts), b""));
                 }
             }
         }
+        {
+            let guard = self.state.read();
+            guard.memtable.put_batch(&batch_datas)?;
+            size = guard.memtable.approximate_size();
+        }
+        self.try_freeze(size)?;
         self.mvcc().update_commit_ts(ts);
+        Ok(ts)
+    }
+
+    pub fn write_batch<T: AsRef<[u8]>>(
+        self: &Arc<Self>,
+        batch: &[WriteBatchRecord<T>],
+    ) -> Result<()> {
+        let txn = self.mvcc().new_txn(self.clone(), self.options.serializable);
+
+        for record in batch {
+            match record {
+                WriteBatchRecord::Put(key, value) => {
+                    txn.put(key.as_ref(), value.as_ref());
+                }
+                WriteBatchRecord::Del(key) => {
+                    txn.delete(key.as_ref());
+                }
+            }
+        }
+        txn.commit()?;
         Ok(())
     }
 
