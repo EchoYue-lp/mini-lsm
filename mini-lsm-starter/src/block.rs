@@ -15,10 +15,12 @@
 mod builder;
 mod iterator;
 
+use crate::compression::{CompressionController, CompressionOptions};
 pub use builder::BlockBuilder;
 use bytes::{Buf, BufMut, Bytes};
 pub use iterator::BlockIterator;
 
+pub(crate) const SIZEOF_U8: usize = std::mem::size_of::<u8>();
 pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
 pub(crate) const SIZEOF_U64: usize = std::mem::size_of::<u64>();
 
@@ -52,18 +54,35 @@ pub struct Block {
 impl Block {
     /// Encode the internal data to the data layout illustrated in the course
     /// Note: You may want to recheck if any of the expected field is missing from your output
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(&self, compression_options: CompressionOptions) -> anyhow::Result<Bytes> {
         let mut buf = self.data.clone();
         let offsets_len = self.offsets.len();
         for offset in &self.offsets {
             buf.put_u16(*offset);
         }
         buf.put_u16(offsets_len as u16);
-        buf.into()
+        let compression_type: u8 = compression_options.into();
+        let controller = CompressionController::new(compression_options);
+        let mut result = controller
+            .compress(buf.as_slice())
+            .map_err(|e| anyhow::anyhow!("Compression failed: {}", e))?;
+        result.put_u8(compression_type);
+        Ok(result.into())
     }
 
     /// Decode from the data layout, transform the input `data` to a single `Block`
-    pub fn decode(data: &[u8]) -> Self {
+    pub fn decode(data: &[u8], compression_options: CompressionOptions) -> anyhow::Result<Self> {
+        // 压缩方式校验
+        let compression_type = (&data[data.len() - SIZEOF_U8..]).get_u8();
+        assert_eq!(
+            compression_type, compression_options as u8,
+            "Compression type mismatch"
+        );
+        let data = &data[..data.len() - SIZEOF_U8];
+        let controller = CompressionController::new(compression_options);
+        let mut data = controller
+            .de_compress(data)
+            .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e))?;
         // 多少个元素
         let entry_offsets_len = (&data[data.len() - SIZEOF_U16..]).get_u16() as usize;
         // 数据和offset的分界线位置
@@ -73,9 +92,7 @@ impl Block {
             .chunks_exact(SIZEOF_U16)
             .map(|mut x| x.get_u16())
             .collect();
-        Self {
-            data: data[..data_end].to_vec(),
-            offsets,
-        }
+        data.truncate(data_end);
+        Ok(Self { data, offsets })
     }
 }

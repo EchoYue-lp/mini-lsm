@@ -28,12 +28,21 @@ use mini_lsm_wrapper::iterators::StorageIterator;
 use mini_lsm_wrapper::lsm_storage::{LsmStorageOptions, MiniLsm};
 use std::path::PathBuf;
 use std::sync::Arc;
+use mini_lsm_starter::compression::CompressionOptions;
 
 #[derive(Debug, Clone, ValueEnum)]
 enum CompactionStrategy {
     Simple,
     Leveled,
     Tiered,
+    None,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum CompressionStrategy {
+    Lz4,
+    Snappy,
+    Gz,
     None,
 }
 
@@ -48,6 +57,7 @@ struct Args {
     enable_wal: bool,
     #[arg(long)]
     serializable: bool,
+    compression: CompressionStrategy,
 }
 
 struct ReplHandler {
@@ -361,6 +371,12 @@ fn main() -> Result<()> {
             },
             enable_wal: args.enable_wal,
             serializable: args.serializable,
+            compression_options: match args.compression {
+                CompressionStrategy::Snappy => CompressionOptions::Snappy,
+                CompressionStrategy::Lz4 => CompressionOptions::Lz4,
+                CompressionStrategy::Gz => CompressionOptions::Gz,
+                CompressionStrategy::None => CompressionOptions::None,
+            }
         },
     )?;
 

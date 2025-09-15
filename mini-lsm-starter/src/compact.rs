@@ -409,7 +409,7 @@ impl LsmStorageInner {
         let compaction_filters = self.compaction_filters.lock().clone();
         'outer: while iter.is_valid() {
             if builder.is_none() {
-                builder = Some(SsTableBuilder::new(self.options.block_size));
+                builder = Some(SsTableBuilder::new(self.options.block_size,self.compression_options));
             }
 
             let same_as_last_key = iter.key().key_ref() == last_key;
@@ -463,7 +463,7 @@ impl LsmStorageInner {
                     self.path_of_sst(sst_id),
                 )?);
                 new_sst.push(sst);
-                builder = Some(SsTableBuilder::new(self.options.block_size));
+                builder = Some(SsTableBuilder::new(self.options.block_size,self.compression_options));
             }
             let builder_inner = builder.as_mut().unwrap();
             builder_inner.add(iter.key(), iter.value());

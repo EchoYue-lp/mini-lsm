@@ -20,6 +20,7 @@ use crate::table::bloom::Bloom;
 use crate::{block::BlockBuilder, key::KeySlice, lsm_storage::BlockCache};
 use anyhow::Result;
 use bytes::BufMut;
+use crate::compression::{ CompressionOptions};
 
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
@@ -31,11 +32,13 @@ pub struct SsTableBuilder {
     block_size: usize,
     key_hashes: Vec<u32>,
     max_ts: u64,
+    /// Compression options
+    compression_options: CompressionOptions,
 }
 
 impl SsTableBuilder {
     /// Create a builder based on target block size.
-    pub fn new(block_size: usize) -> Self {
+    pub fn new(block_size: usize,compression_options: CompressionOptions) -> Self {
         SsTableBuilder {
             builder: BlockBuilder::new(block_size),
             first_key: KeyVec::new(),
@@ -45,6 +48,7 @@ impl SsTableBuilder {
             block_size,
             key_hashes: Vec::new(),
             max_ts: 0,
+            compression_options,
         }
     }
 
@@ -122,6 +126,7 @@ impl SsTableBuilder {
             block_meta: self.meta,
             bloom: Some(bloom),
             max_ts: self.max_ts,
+            compression_options:self.compression_options,
         };
         Ok(sstable)
     }
@@ -133,9 +138,10 @@ impl SsTableBuilder {
 
     /// 将当前 block 写入到 data 中，并更新 meta
     fn finish_block(&mut self) {
-        // std::mem::replace 返回的是旧的，就的地址是新的内容
+        // std::mem::replace 返回的是旧的，旧的地址是新的内容
         let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
-        let encoded_block = builder.build().encode();
+        let encoded_block = builder.build().encode(self.compression_options)
+            .expect("Block encoding failed");
         self.meta.push(BlockMeta {
             offset: self.data.len(),
             // 返回之前的值，地址置为默认值

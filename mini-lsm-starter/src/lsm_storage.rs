@@ -24,6 +24,7 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::compression::{ CompressionOptions};
 use crate::iterators::StorageIterator;
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
@@ -100,6 +101,7 @@ pub struct LsmStorageOptions {
     pub compaction_options: CompactionOptions,
     pub enable_wal: bool,
     pub serializable: bool,
+    pub compression_options: CompressionOptions,
 }
 
 impl LsmStorageOptions {
@@ -111,6 +113,7 @@ impl LsmStorageOptions {
             enable_wal: false,
             num_memtable_limit: 50,
             serializable: false,
+            compression_options: CompressionOptions::Snappy,
         }
     }
 
@@ -122,6 +125,7 @@ impl LsmStorageOptions {
             enable_wal: false,
             num_memtable_limit: 2,
             serializable: false,
+            compression_options: CompressionOptions::Snappy,
         }
     }
 
@@ -133,6 +137,7 @@ impl LsmStorageOptions {
             enable_wal: false,
             num_memtable_limit: 2,
             serializable: false,
+            compression_options: CompressionOptions::Snappy,
         }
     }
 }
@@ -151,6 +156,7 @@ pub(crate) struct LsmStorageInner {
     next_sst_id: AtomicUsize,
     pub(crate) options: Arc<LsmStorageOptions>,
     pub(crate) compaction_controller: CompactionController,
+    pub(crate) compression_options: CompressionOptions,
     pub(crate) manifest: Option<Manifest>,
     pub(crate) mvcc: Option<LsmMvccInner>,
     pub(crate) compaction_filters: Arc<Mutex<Vec<CompactionFilter>>>,
@@ -320,6 +326,9 @@ impl LsmStorageInner {
             ),
             CompactionOptions::NoCompaction => CompactionController::NoCompaction,
         };
+
+        let compression_options = options.compression_options;
+
         if !path.exists() {
             std::fs::create_dir_all(path).context("failed to create DB dir")?;
         }
@@ -376,6 +385,7 @@ impl LsmStorageInner {
                     Some(block_cache.clone()),
                     FileObject::open(&Self::path_of_sst_static(path, table_id))
                         .context("failed to open SST")?,
+                    compression_options,
                 )?;
                 last_commit_ts = last_commit_ts.max(sst.max_ts());
                 state.sstables.insert(table_id, Arc::new(sst));
@@ -440,6 +450,7 @@ impl LsmStorageInner {
             options: options.into(),
             mvcc: Some(LsmMvccInner::new(last_commit_ts)),
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
+            compression_options,
         };
         storage.sync_dir()?;
 
@@ -697,7 +708,8 @@ impl LsmStorageInner {
                 .clone();
         }
         // flush
-        let mut flush_builder = SsTableBuilder::new(self.options.block_size);
+        let mut flush_builder =
+            SsTableBuilder::new(self.options.block_size, self.compression_options);
         flush_memtable.flush(&mut flush_builder)?;
         let sst_id = flush_memtable.id();
 

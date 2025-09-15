@@ -27,6 +27,7 @@ pub use iterator::SsTableIterator;
 use nom::complete::bool;
 
 use crate::block::Block;
+use crate::compression::{ CompressionOptions};
 use crate::key::{KeyBytes, KeySlice};
 use crate::lsm_storage::BlockCache;
 
@@ -164,16 +165,22 @@ pub struct SsTable {
     pub(crate) bloom: Option<Bloom>,
     /// The maximum timestamp stored in this SST, implemented in week 3.
     max_ts: u64,
+    compression_options: CompressionOptions,
 }
 
 impl SsTable {
     #[cfg(test)]
     pub(crate) fn open_for_test(file: FileObject) -> Result<Self> {
-        Self::open(0, None, file)
+        Self::open(0, None, file, CompressionOptions::None)
     }
 
     /// Open SSTable from a file.
-    pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
+    pub fn open(
+        id: usize,
+        block_cache: Option<Arc<BlockCache>>,
+        file: FileObject,
+        compression_options: CompressionOptions,
+    ) -> Result<Self> {
         let len = file.size();
         let raw_bloom_offset = file.read(len - 4, 4)?;
         let bloom_offset = (&raw_bloom_offset[..]).get_u32() as u64;
@@ -195,6 +202,7 @@ impl SsTable {
             block_meta: block_meta,
             bloom: Some(bloom_filter),
             max_ts,
+            compression_options,
         };
         Ok(sst)
     }
@@ -216,6 +224,7 @@ impl SsTable {
             last_key,
             bloom: None,
             max_ts: 0,
+            compression_options: CompressionOptions::None,
         }
     }
 
@@ -235,7 +244,7 @@ impl SsTable {
         if checksum != crc32fast::hash(block_data) {
             bail!("block checksum mismatched");
         }
-        Ok(Arc::new(Block::decode(block_data)))
+        Ok(Arc::new(Block::decode(block_data, self.compression_options)?))
     }
 
     /// Read a block from disk, with block cache. (Day 4)

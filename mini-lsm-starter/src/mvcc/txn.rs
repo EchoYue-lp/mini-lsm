@@ -15,7 +15,6 @@
 use anyhow::{Result, bail};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
-use moka::Entry;
 use nom::combinator::iterator;
 use ouroboros::self_referencing;
 use parking_lot::Mutex;
