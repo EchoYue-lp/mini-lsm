@@ -701,6 +701,12 @@ impl LsmStorageInner {
         let flush_memtable;
         {
             let guard = self.state.read();
+            // 安全检查：如果没有immutable memtables，说明已经被其他线程刷新完毕
+            // 这是一个正常情况，直接返回成功
+            // todo ，这里有问题，以后有空修改
+            if guard.imm_memtables.is_empty() {
+                return Ok(());
+            }
             flush_memtable = guard
                 .imm_memtables
                 .last()
@@ -745,6 +751,7 @@ impl LsmStorageInner {
         self.sync_dir()?;
         Ok(())
     }
+
 
     pub fn new_txn(self: &Arc<Self>) -> Result<Arc<Transaction>> {
         Ok(self.mvcc().new_txn(self.clone(), self.options.serializable))
