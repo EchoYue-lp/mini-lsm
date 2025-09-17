@@ -11,7 +11,7 @@ impl Lz4CompressionController {
     }
 
     pub(crate) fn de_compress(ori: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let decompressed_data = decompress_size_prepended(&ori)
+        let decompressed_data = decompress_size_prepended(ori)
             .map_err(|e| anyhow::anyhow!("LZ4 decompression failed: {}", e))?;
         Ok(decompressed_data)
     }

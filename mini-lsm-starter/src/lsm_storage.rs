@@ -39,11 +39,7 @@ use crate::mvcc::txn::{Transaction, TxnIterator};
 use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use clap::builder;
-use nom::character::complete::tab;
-use nom::combinator::iterator;
 use parking_lot::{Mutex, MutexGuard, RwLock};
-use serde_json::from_slice;
 
 /// key:(sst_id, block_id)
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;

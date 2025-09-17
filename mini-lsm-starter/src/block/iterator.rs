@@ -48,7 +48,7 @@ impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
         Self {
             first_key: block.get_first_key(),
-            block: block,
+            block,
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
@@ -70,7 +70,7 @@ impl BlockIterator {
     }
 
     /// Returns the key of the current entry.
-    pub fn key(&self) -> KeySlice {
+    pub fn key(&self) -> KeySlice<'_> {
         debug_assert!(!self.key.is_empty(), "invalid iterator");
         self.key.as_key_slice()
     }

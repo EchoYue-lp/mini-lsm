@@ -87,7 +87,7 @@ fn test_block_build_all() {
 #[test]
 fn test_block_encode() {
     let block = generate_block();
-    block.encode(CompressionOptions::Snappy);
+    let _ = block.encode(CompressionOptions::Snappy);
 }
 
 #[test]

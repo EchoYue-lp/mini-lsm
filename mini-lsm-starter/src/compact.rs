@@ -29,7 +29,6 @@ use crate::lsm_storage::{CompactionFilter, LsmStorageInner, LsmStorageState};
 use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 use anyhow::Result;
-use crossbeam_channel::select;
 pub use leveled::{LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask};
 use serde::{Deserialize, Serialize};
 pub use simple_leveled::{
@@ -222,9 +221,7 @@ impl LsmStorageInner {
         }
     }
 
-    /**
-     *
-     */
+
 
     pub fn force_full_compaction(&self) -> Result<()> {
         let CompactionOptions::NoCompaction = self.options.compaction_options else {
@@ -250,7 +247,7 @@ impl LsmStorageInner {
         let mut ids: Vec<usize> = Vec::with_capacity(sstables.len());
 
         {
-            let state_lock = self.state_lock.lock();
+            let _state_lock = self.state_lock.lock();
             let mut state = self.state.read().as_ref().clone();
 
             for sst in l0_sstables.iter().chain(l1_sstables.iter()) {
@@ -368,10 +365,11 @@ impl LsmStorageInner {
     }
 
     fn trigger_flush(&self) -> Result<()> {
-        if {
+        let res = {
             let state = self.state.read();
             state.imm_memtables.len() >= self.options.num_memtable_limit
-        } {
+        };
+        if res {
             self.force_flush_next_imm_memtable()?;
         }
         Ok(())
@@ -409,7 +407,10 @@ impl LsmStorageInner {
         let compaction_filters = self.compaction_filters.lock().clone();
         'outer: while iter.is_valid() {
             if builder.is_none() {
-                builder = Some(SsTableBuilder::new(self.options.block_size,self.compression_options));
+                builder = Some(SsTableBuilder::new(
+                    self.options.block_size,
+                    self.compression_options,
+                ));
             }
 
             let same_as_last_key = iter.key().key_ref() == last_key;
@@ -463,7 +464,10 @@ impl LsmStorageInner {
                     self.path_of_sst(sst_id),
                 )?);
                 new_sst.push(sst);
-                builder = Some(SsTableBuilder::new(self.options.block_size,self.compression_options));
+                builder = Some(SsTableBuilder::new(
+                    self.options.block_size,
+                    self.compression_options,
+                ));
             }
             let builder_inner = builder.as_mut().unwrap();
             builder_inner.add(iter.key(), iter.value());

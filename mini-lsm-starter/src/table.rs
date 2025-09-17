@@ -24,10 +24,9 @@ use anyhow::{Result, anyhow, bail};
 pub use builder::SsTableBuilder;
 use bytes::{Buf, BufMut};
 pub use iterator::SsTableIterator;
-use nom::complete::bool;
 
 use crate::block::Block;
-use crate::compression::{ CompressionOptions};
+use crate::compression::CompressionOptions;
 use crate::key::{KeyBytes, KeySlice};
 use crate::lsm_storage::BlockCache;
 
@@ -199,7 +198,7 @@ impl SsTable {
             block_cache,
             first_key: block_meta.first().unwrap().first_key.clone(),
             last_key: block_meta.last().unwrap().last_key.clone(),
-            block_meta: block_meta,
+            block_meta,
             bloom: Some(bloom_filter),
             max_ts,
             compression_options,
@@ -244,7 +243,10 @@ impl SsTable {
         if checksum != crc32fast::hash(block_data) {
             bail!("block checksum mismatched");
         }
-        Ok(Arc::new(Block::decode(block_data, self.compression_options)?))
+        Ok(Arc::new(Block::decode(
+            block_data,
+            self.compression_options,
+        )?))
     }
 
     /// Read a block from disk, with block cache. (Day 4)

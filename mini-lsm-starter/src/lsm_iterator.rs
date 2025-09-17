@@ -23,14 +23,6 @@ use anyhow::{Result, bail};
 use bytes::Bytes;
 use std::ops::Bound;
 
-/// Represents the internal type for an LSM iterator. This type will be changed across the course for multiple times.
-// type LsmIteratorInner = MergeIterator<MemTableIterator>;
-
-// week 1 day 5
-// type LsmIteratorInner =
-//     TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>;
-
-// week 2 day 1
 type LsmIteratorInner = TwoMergeIterator<
     TwoMergeIterator<MergeIterator<MemTableIterator>, MergeIterator<SsTableIterator>>,
     MergeIterator<SstConcatIterator>,
@@ -175,11 +167,11 @@ impl<I: StorageIterator> StorageIterator for FusedIterator<I> {
         if self.has_errored {
             bail!("the iterator is tainted");
         }
-        if self.iter.is_valid() {
-            if let Err(e) = self.iter.next() {
-                self.has_errored = true;
-                return Err(e);
-            }
+        if self.iter.is_valid()
+            && let Err(e) = self.iter.next()
+        {
+            self.has_errored = true;
+            return Err(e);
         }
         Ok(())
     }

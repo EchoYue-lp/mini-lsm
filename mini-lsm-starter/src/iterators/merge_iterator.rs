@@ -97,7 +97,7 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
 {
     type KeyType<'a> = KeySlice<'a>;
 
-    fn key(&self) -> KeySlice {
+    fn key(&self) -> KeySlice<'_> {
         self.current.as_ref().unwrap().1.key()
     }
 
@@ -142,18 +142,18 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
 
         current.1.next()?;
         // current 中没有元素了，替换 current
-        if !current.1.is_valid() {
-            if let Some(iter) = self.iters.pop() {
-                *current = iter;
-            }
+        if !current.1.is_valid()
+            && let Some(iter) = self.iters.pop()
+        {
+            *current = iter;
         }
 
         // 如果 current 中的元素比 堆顶元素大，则替换堆顶元素
         // *current < *inner_iter 这里可能会有疑惑，因为我们重写了 cmp
-        if let Some(mut inner_iter) = self.iters.peek_mut() {
-            if *current < *inner_iter {
-                std::mem::swap(&mut *inner_iter, current);
-            }
+        if let Some(mut inner_iter) = self.iters.peek_mut()
+            && *current < *inner_iter
+        {
+            std::mem::swap(&mut *inner_iter, current);
         }
 
         Ok(())

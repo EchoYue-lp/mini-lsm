@@ -45,7 +45,7 @@ pub(crate) const SIZEOF_U64: usize = std::mem::size_of::<u64>();
 ///     |   0  |  12  |       2       |
 ///     -------------------------------
 ///
-
+#[warn(clippy::empty_line_after_doc_comments)]
 pub struct Block {
     pub(crate) data: Vec<u8>,
     pub(crate) offsets: Vec<u16>,
