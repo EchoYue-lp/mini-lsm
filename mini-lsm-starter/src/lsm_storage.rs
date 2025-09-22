@@ -21,10 +21,11 @@ use std::sync::atomic::AtomicUsize;
 
 use crate::block::Block;
 use crate::compact::{
-    CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
-    SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
+    CompactionController, CompactionOptions, CompactionTask, LeveledCompactionController,
+    LeveledCompactionOptions, LeveledTaskType, SimpleLeveledCompactionController,
+    SimpleLeveledCompactionOptions, TieredCompactionController,
 };
-use crate::compression::{ CompressionOptions};
+use crate::compression::CompressionOptions;
 use crate::iterators::StorageIterator;
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
@@ -658,7 +659,7 @@ impl LsmStorageInner {
         let mut snapshot = guard.as_ref().clone();
         let old_memtable = std::mem::replace(&mut snapshot.memtable, new_memtable);
         // Add the memtable to the immutable memtables.
-        snapshot.imm_memtables.insert(0, old_memtable.clone());
+        snapshot.imm_memtables.insert(0, old_memtable);
         // Update the snapshot.
         *guard = Arc::new(snapshot);
         drop(guard);
@@ -667,6 +668,10 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
+        if self.state.read().memtable.is_empty() {
+            return Ok(());
+        }
+
         let memtable_id = self.next_sst_id();
 
         let memtable = if self.options.enable_wal {
@@ -697,9 +702,6 @@ impl LsmStorageInner {
         let flush_memtable;
         {
             let guard = self.state.read();
-            // 安全检查：如果没有immutable memtables，说明已经被其他线程刷新完毕
-            // 这是一个正常情况，直接返回成功
-            // todo ，这里有问题，以后有空修改
             if guard.imm_memtables.is_empty() {
                 return Ok(());
             }
@@ -709,7 +711,7 @@ impl LsmStorageInner {
                 .expect("no imm memtables!")
                 .clone();
         }
-        // flush
+        // flush non-empty memtable to SST
         let mut flush_builder =
             SsTableBuilder::new(self.options.block_size, self.compression_options);
         flush_memtable.flush(&mut flush_builder)?;
@@ -747,7 +749,6 @@ impl LsmStorageInner {
         self.sync_dir()?;
         Ok(())
     }
-
 
     pub fn new_txn(self: &Arc<Self>) -> Result<Arc<Transaction>> {
         Ok(self.mvcc().new_txn(self.clone(), self.options.serializable))

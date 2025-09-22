@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub(crate) use crate::compact::leveled::LeveledTaskType;
 use crate::iterators::StorageIterator;
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
@@ -179,11 +180,29 @@ impl LsmStorageInner {
                     for id in lower_level_sst_ids.iter() {
                         lower_ssts.push(snapshot.sstables.get(id).unwrap().clone());
                     }
-                    let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
-                    self.compact_generate_sst_from_iter(
-                        TwoMergeIterator::create(upper_iter, lower_iter)?,
-                        task.compact_to_bottom_level(),
-                    )
+                    // SstConcatIterator assumes non-overlapping tables; under races/recovery,
+                    // transient overlaps can appear, so we conservatively fall back.
+                    if lower_ssts
+                        .windows(2)
+                        .all(|w| w[0].last_key() < w[1].first_key())
+                    {
+                        let lower_iter =
+                            SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
+                        self.compact_generate_sst_from_iter(
+                            TwoMergeIterator::create(upper_iter, lower_iter)?,
+                            task.compact_to_bottom_level(),
+                        )
+                    } else {
+                        let mut iters = Vec::with_capacity(lower_ssts.len());
+                        for sst in lower_ssts.into_iter() {
+                            iters.push(Box::new(SsTableIterator::create_and_seek_to_first(sst)?));
+                        }
+                        let lower_iter = MergeIterator::create(iters);
+                        self.compact_generate_sst_from_iter(
+                            TwoMergeIterator::create(upper_iter, lower_iter)?,
+                            task.compact_to_bottom_level(),
+                        )
+                    }
                 }
                 None => {
                     let mut upper_iters = Vec::with_capacity(upper_level_sst_ids.len());
@@ -197,11 +216,29 @@ impl LsmStorageInner {
                     for id in lower_level_sst_ids.iter() {
                         lower_ssts.push(snapshot.sstables.get(id).unwrap().clone());
                     }
-                    let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
-                    self.compact_generate_sst_from_iter(
-                        TwoMergeIterator::create(upper_iter, lower_iter)?,
-                        task.compact_to_bottom_level(),
-                    )
+                    // If lower-level SSTs overlap, fall back to MergeIterator to avoid
+                    // SstConcatIterator invariants (non-overlapping) being violated.
+                    if lower_ssts
+                        .windows(2)
+                        .all(|w| w[0].last_key() < w[1].first_key())
+                    {
+                        let lower_iter =
+                            SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
+                        self.compact_generate_sst_from_iter(
+                            TwoMergeIterator::create(upper_iter, lower_iter)?,
+                            task.compact_to_bottom_level(),
+                        )
+                    } else {
+                        let mut iters = Vec::with_capacity(lower_ssts.len());
+                        for sst in lower_ssts.into_iter() {
+                            iters.push(Box::new(SsTableIterator::create_and_seek_to_first(sst)?));
+                        }
+                        let lower_iter = MergeIterator::create(iters);
+                        self.compact_generate_sst_from_iter(
+                            TwoMergeIterator::create(upper_iter, lower_iter)?,
+                            task.compact_to_bottom_level(),
+                        )
+                    }
                 }
             },
             CompactionTask::Tiered(TieredCompactionTask { tiers, .. }) => {
@@ -220,8 +257,6 @@ impl LsmStorageInner {
             }
         }
     }
-
-
 
     pub fn force_full_compaction(&self) -> Result<()> {
         let CompactionOptions::NoCompaction = self.options.compaction_options else {
@@ -290,6 +325,92 @@ impl LsmStorageInner {
             .generate_compaction_task(&snapshot);
 
         let Some(task) = task else { return Ok(()) };
+
+        match task {
+            CompactionTask::Leveled(leveled_task)
+                if matches!(
+                    leveled_task.leveled_task_type,
+                    LeveledTaskType::TrivialMoveTask
+                ) =>
+            {
+                self.trivial_move(leveled_task)
+            }
+            _ => self.trigger_merge_compaction(task),
+        }
+    }
+
+    // trivial move 的主逻辑：不做文件读写，只更新元数据，并按与普通合并一致的流程持久化。
+    fn trivial_move(&self, task: LeveledCompactionTask) -> Result<()> {
+        self.dump_structure();
+
+        // 基本校验（锁外）
+        if task.upper_level_sst_ids.is_empty() {
+            return Err(anyhow::anyhow!("upper_level_sst_ids cannot be empty"));
+        }
+
+        let outputs = task.upper_level_sst_ids.clone();
+        let moved_sst = outputs[0];
+        let target_level = task.lower_level;
+
+        // 记录日志，便于调试
+        println!(
+            "Trivial move: {} from {:?} to level {}",
+            moved_sst, task.upper_level, target_level
+        );
+
+        // 在与其它状态更新串行的临界区内，基于最新快照应用变更并写入 manifest。
+        let state_lock = self.state_lock.lock();
+
+        // 1) 使用最新快照再检查一次是否仍然满足“无重叠”，避免过期任务导致状态非法。
+        let latest_snapshot = self.state.read().as_ref().clone();
+        // lower level 必须存在
+        if target_level == 0 || target_level > latest_snapshot.levels.len() {
+            // 异常的 compaction 任务，直接跳过
+            return Ok(());
+        }
+        let moved_first = latest_snapshot.sstables[&moved_sst].first_key();
+        let moved_last = latest_snapshot.sstables[&moved_sst].last_key();
+        let has_overlap = latest_snapshot.levels[target_level - 1].1.iter().any(|id| {
+            let sst = &latest_snapshot.sstables[id];
+            let first = sst.first_key();
+            let last = sst.last_key();
+            !(last < moved_first || first > moved_last)
+        });
+
+        if has_overlap {
+            // 当前已出现重叠，说明该 trivial move 任务已过期，跳过本次移动，留待下一轮生成正确的合并任务。
+            return Ok(());
+        }
+
+        // 2) 仍然满足无重叠，应用元数据变更（复用 leveled 的 apply_compaction_result 保持一致性）。
+        let (new_snapshot, _files_to_remove) = match &self.compaction_controller {
+            CompactionController::Leveled(ctrl) => {
+                ctrl.apply_compaction_result(&latest_snapshot, &task, &outputs, false)
+            }
+            _ => unreachable!("trivial move only applies to leveled compaction"),
+        };
+
+        // 更新内存状态
+        {
+            let mut state = self.state.write();
+            *state = Arc::new(new_snapshot);
+        }
+
+        // 目录刷盘，再记录 manifest（与合并流程保持一致的持久化顺序）
+        self.sync_dir()?;
+        self.manifest().add_record(
+            &state_lock,
+            ManifestRecord::Compaction(CompactionTask::Leveled(task), outputs),
+        )?;
+
+        Ok(())
+    }
+
+    // Compact the task and get the new SSTs
+    // 1、生成 compact 任务；
+    // 2、执行 compact
+    // 3、根据 compact 生成的新的 SSTs，对原有的 ssts 进行删除
+    fn trigger_merge_compaction(&self, task: CompactionTask) -> Result<()> {
         self.dump_structure();
         println!("running compaction task: {:?}", task);
 

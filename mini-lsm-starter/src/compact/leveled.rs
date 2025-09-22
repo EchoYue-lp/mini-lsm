@@ -18,6 +18,12 @@ use std::collections::HashSet;
 use crate::lsm_storage::LsmStorageState;
 
 #[derive(Debug, Serialize, Deserialize)]
+pub enum LeveledTaskType {
+    MergeCompactionTask,
+    TrivialMoveTask,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LeveledCompactionTask {
     // if upper_level is `None`, then it is L0 compaction
     pub upper_level: Option<usize>,
@@ -25,6 +31,7 @@ pub struct LeveledCompactionTask {
     pub lower_level: usize,
     pub lower_level_sst_ids: Vec<usize>,
     pub is_lower_level_bottom_level: bool,
+    pub leveled_task_type: LeveledTaskType,
 }
 
 #[derive(Debug, Clone)]
@@ -78,7 +85,6 @@ impl LeveledCompactionController {
         &self,
         snapshot: &LsmStorageState,
     ) -> Option<LeveledCompactionTask> {
-        // task 1 ,计算目标层大小
         let mut target_level_size = (0..self.options.max_levels).map(|_| 0).collect::<Vec<_>>();
         let mut real_level_size = Vec::with_capacity(self.options.max_levels);
         let mut base_level = self.options.max_levels;
@@ -109,16 +115,39 @@ impl LeveledCompactionController {
 
         if snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
             println!("flush L0 SST to base level {}", base_level);
+
+            let upper_level_sst_ids = snapshot.l0_sstables.clone();
+            let mut all_overlap_ssts = Vec::new();
+            let mut all_upper_level_ssts = Vec::new();
+
+            for upper_level_sst_id in upper_level_sst_ids {
+                let this_one_overlap_ssts =
+                    self.find_overlapping_ssts(snapshot, &[upper_level_sst_id], base_level);
+
+                if this_one_overlap_ssts.is_empty() {
+                    return Some(LeveledCompactionTask {
+                        upper_level: None,
+                        upper_level_sst_ids: vec![upper_level_sst_id],
+                        lower_level: base_level,
+                        lower_level_sst_ids: this_one_overlap_ssts,
+                        is_lower_level_bottom_level: base_level == self.options.max_levels,
+                        leveled_task_type: LeveledTaskType::TrivialMoveTask,
+                    });
+                } else {
+                    all_overlap_ssts.extend(this_one_overlap_ssts);
+                    all_upper_level_ssts.push(upper_level_sst_id);
+                }
+            }
+            all_overlap_ssts.sort();
+            all_overlap_ssts.dedup();
+
             return Some(LeveledCompactionTask {
                 upper_level: None,
-                upper_level_sst_ids: snapshot.l0_sstables.clone(),
+                upper_level_sst_ids: all_upper_level_ssts,
                 lower_level: base_level,
-                lower_level_sst_ids: self.find_overlapping_ssts(
-                    snapshot,
-                    &snapshot.l0_sstables,
-                    base_level,
-                ),
+                lower_level_sst_ids: all_overlap_ssts,
                 is_lower_level_bottom_level: base_level == self.options.max_levels,
+                leveled_task_type: LeveledTaskType::MergeCompactionTask,
             });
         }
 
@@ -151,16 +180,23 @@ impl LeveledCompactionController {
                 "compaction triggered by priority: {level} out of {:?}, select {selected_sst} for compaction",
                 priorities
             );
+
+            let lower_level_sst_ids =
+                self.find_overlapping_ssts(snapshot, &[selected_sst], level + 1);
+
+            let leveled_task_type = if lower_level_sst_ids.is_empty() {
+                LeveledTaskType::TrivialMoveTask
+            } else {
+                LeveledTaskType::MergeCompactionTask
+            };
+
             return Some(LeveledCompactionTask {
                 upper_level: Some(level),
                 upper_level_sst_ids: vec![selected_sst],
                 lower_level: level + 1,
-                lower_level_sst_ids: self.find_overlapping_ssts(
-                    snapshot,
-                    &[selected_sst],
-                    level + 1,
-                ),
+                lower_level_sst_ids,
                 is_lower_level_bottom_level: level + 1 == self.options.max_levels,
+                leveled_task_type,
             });
         }
         None
@@ -212,8 +248,14 @@ impl LeveledCompactionController {
             assert!(upper_level_sst_ids_set.is_empty());
             snapshot.l0_sstables = new_l0_ssts;
         }
-        files_to_remove.extend(&task.upper_level_sst_ids);
-        files_to_remove.extend(&task.lower_level_sst_ids);
+
+        match task.leveled_task_type {
+            LeveledTaskType::MergeCompactionTask => {
+                files_to_remove.extend(&task.upper_level_sst_ids);
+                files_to_remove.extend(&task.lower_level_sst_ids);
+            }
+            _ => {}
+        }
 
         let mut new_lower_level_ssts = snapshot.levels[task.lower_level - 1]
             .1

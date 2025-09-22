@@ -134,3 +134,52 @@ fn test_compression_work() {
         println!();
     }
 }
+
+// 简单的 Trivial Move 测试验证
+#[test]
+fn test_trivial_move_simple_verification() {
+    use std::time::Duration;
+    use tempfile::tempdir;
+    use crate::{
+        compact::{
+            CompactionOptions, LeveledCompactionOptions,
+        },
+        lsm_storage::{LsmStorageOptions, MiniLsm},
+    };
+
+    println!("=== 简单 Trivial Move 验证 ===");
+
+    // 创建 Leveled 配置
+    let compaction_options = CompactionOptions::Leveled(LeveledCompactionOptions {
+        level_size_multiplier: 10,
+        level0_file_num_compaction_trigger: 2,
+        max_levels: 4,
+        base_level_size_mb: 1,
+    });
+
+    let lsm_storage_options = LsmStorageOptions::default_for_week2_test(compaction_options.clone());
+    let dir = tempdir().unwrap();
+    let storage = MiniLsm::open(&dir, lsm_storage_options.clone()).unwrap();
+
+    // 插入少量数据
+    for i in 0..4 {
+        let key = format!("key{:02}", i).as_bytes().to_vec();
+        let value = vec![i as u8; 128];
+        storage.put(&key, &value).unwrap();
+    }
+
+    // 冻结 memtable
+    storage.inner.force_freeze_memtable(&storage.inner.state_lock.lock()).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    // 验证数据
+    for i in 0..4 {
+        let key = format!("key{:02}", i).as_bytes().to_vec();
+        let result = storage.get(&key).unwrap();
+        assert!(result.is_some(), "键 {:?} 应该存在", key);
+        assert_eq!(result.unwrap(), vec![i as u8; 128]);
+    }
+
+    storage.close().unwrap();
+    println!("=== 简单 Trivial Move 验证完成 ===");
+}
