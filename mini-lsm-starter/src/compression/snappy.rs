@@ -1,4 +1,4 @@
-use snap::raw::{decompress_len, max_compress_len, Decoder, Encoder};
+use snap::raw::{Decoder, Encoder, decompress_len, max_compress_len};
 
 #[derive(Debug, Clone)]
 pub struct SnappyCompressionController {}

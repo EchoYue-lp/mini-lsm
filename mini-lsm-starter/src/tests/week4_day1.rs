@@ -138,14 +138,12 @@ fn test_compression_work() {
 // 简单的 Trivial Move 测试验证
 #[test]
 fn test_trivial_move_simple_verification() {
-    use std::time::Duration;
-    use tempfile::tempdir;
     use crate::{
-        compact::{
-            CompactionOptions, LeveledCompactionOptions,
-        },
+        compact::{CompactionOptions, LeveledCompactionOptions},
         lsm_storage::{LsmStorageOptions, MiniLsm},
     };
+    use std::time::Duration;
+    use tempfile::tempdir;
 
     println!("=== 简单 Trivial Move 验证 ===");
 
@@ -169,7 +167,10 @@ fn test_trivial_move_simple_verification() {
     }
 
     // 冻结 memtable
-    storage.inner.force_freeze_memtable(&storage.inner.state_lock.lock()).unwrap();
+    storage
+        .inner
+        .force_freeze_memtable(&storage.inner.state_lock.lock())
+        .unwrap();
     std::thread::sleep(Duration::from_millis(500));
 
     // 验证数据

@@ -1,6 +1,5 @@
 // Trivial Move 功能测试
 
-use std::os::macos::raw::stat;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -192,41 +191,28 @@ fn test_trivial_move_recovery() {
     // 第一批数据：key0000-key9999
     for i in 0..10000 {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
-        let value = vec![i as u8; 1024 ]; // 512B 的值
+        let value = vec![i as u8; 1024 * 16]; // 512B 的值
         storage.put(&key, &value).unwrap();
     }
 
-    if !storage.inner.state.read().memtable.is_empty() {
-        storage
-            .inner
-            .force_freeze_memtable(&storage.inner.state_lock.lock())
-            .unwrap();
-    }
-    // // 冻结 memtable 创建第一个 SST
-    // storage
-    //     .inner
-    //     .force_freeze_memtable(&storage.inner.state_lock.lock())
-    //     .unwrap();
+    // 冻结 memtable 创建第一个 SST
+    storage
+        .inner
+        .force_freeze_memtable(&storage.inner.state_lock.lock())
+        .unwrap();
 
     // 第二批数据：key10000-key11999（不与第一批重叠）
     for i in 10000..12000 {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
-        let value = vec![i as u8; 1024 ];
+        let value = vec![i as u8; 1024 * 16];
         storage.put(&key, &value).unwrap();
     }
 
-    if !storage.inner.state.read().memtable.is_empty() {
-        storage
-            .inner
-            .force_freeze_memtable(&storage.inner.state_lock.lock())
-            .unwrap();
-    }
-
     // 冻结 memtable 创建第二个 SST，触发 trivial move
-    // storage
-    //     .inner
-    //     .force_freeze_memtable(&storage.inner.state_lock.lock())
-    //     .unwrap();
+    storage
+        .inner
+        .force_freeze_memtable(&storage.inner.state_lock.lock())
+        .unwrap();
 
     // 等待 compaction 完成
     std::thread::sleep(Duration::from_secs(1));
@@ -248,7 +234,7 @@ fn test_trivial_move_recovery() {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
         let result = storage.get(&key).unwrap();
         if let Some(value) = result {
-            assert_eq!(value, vec![i as u8; 1024 ]);
+            assert_eq!(value, vec![i as u8; 1024 * 16]);
             found_count += 1;
         }
     }
@@ -274,7 +260,7 @@ fn test_trivial_move_recovery() {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
         let result = storage.get(&key).unwrap();
         if let Some(value) = result {
-            assert_eq!(value, vec![i as u8; 1024 ]);
+            assert_eq!(value, vec![i as u8; 1024 * 16]);
             found_count += 1;
         }
     }
@@ -283,7 +269,7 @@ fn test_trivial_move_recovery() {
     println!("5. 插入新数据验证系统仍然正常工作...");
     for i in 10000..11025 {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
-        let value = vec![i as u8; 1024 ];
+        let value = vec![i as u8; 1024 * 16];
         storage.put(&key, &value).unwrap();
     }
 
@@ -292,7 +278,7 @@ fn test_trivial_move_recovery() {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
         let result = storage.get(&key).unwrap();
         assert!(result.is_some(), "新插入的键应该存在");
-        assert_eq!(result.unwrap(), vec![i as u8; 1024 ]);
+        assert_eq!(result.unwrap(), vec![i as u8; 1024 * 16]);
     }
 
     storage.close().unwrap();
@@ -403,17 +389,10 @@ fn test_duplicate_sst_detection() {
             storage.put(&key, &value).unwrap();
         }
 
-        if !storage.inner.state.read().memtable.is_empty() {
-            storage
-                .inner
-                .force_freeze_memtable(&storage.inner.state_lock.lock())
-                .unwrap();
-        }
-
-        // storage
-        //     .inner
-        //     .force_freeze_memtable(&storage.inner.state_lock.lock())
-        //     .unwrap();
+        storage
+            .inner
+            .force_freeze_memtable(&storage.inner.state_lock.lock())
+            .unwrap();
 
         // 插入第二批不重叠数据
         for i in 5..10 {
@@ -422,18 +401,10 @@ fn test_duplicate_sst_detection() {
             storage.put(&key, &value).unwrap();
         }
 
-        // if self.state.read().memtable.is_empty() {
-        //     return Ok(());
-        // }
-
-        if !storage.inner.state.read().memtable.is_empty() {
-            storage
-                .inner
-                .force_freeze_memtable(&storage.inner.state_lock.lock())
-                .unwrap();
-        }
-
-
+        storage
+            .inner
+            .force_freeze_memtable(&storage.inner.state_lock.lock())
+            .unwrap();
         std::thread::sleep(Duration::from_millis(500));
 
         // 确保所有 flush 和 compaction 完成

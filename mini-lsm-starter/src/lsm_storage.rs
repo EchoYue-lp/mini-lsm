@@ -12,13 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashMap};
-use std::fs::File;
-use std::ops::Bound;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
-
 use crate::block::Block;
 use crate::compact::{
     CompactionController, CompactionOptions, CompactionTask, LeveledCompactionController,
@@ -41,6 +34,14 @@ use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard, RwLock};
+use rayon::ThreadPool;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fs::File;
+use std::ops::Bound;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 /// key:(sst_id, block_id)
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
@@ -96,6 +97,7 @@ pub struct LsmStorageOptions {
     // Maximum number of memtables in memory, flush to L0 when exceeding this limit
     pub num_memtable_limit: usize,
     pub compaction_options: CompactionOptions,
+    pub num_compaction_thread_limit: usize,
     pub enable_wal: bool,
     pub serializable: bool,
     pub compression_options: CompressionOptions,
@@ -111,6 +113,7 @@ impl LsmStorageOptions {
             num_memtable_limit: 50,
             serializable: false,
             compression_options: CompressionOptions::Snappy,
+            num_compaction_thread_limit: 2,
         }
     }
 
@@ -123,6 +126,7 @@ impl LsmStorageOptions {
             num_memtable_limit: 2,
             serializable: false,
             compression_options: CompressionOptions::Snappy,
+            num_compaction_thread_limit: 2,
         }
     }
 
@@ -135,6 +139,7 @@ impl LsmStorageOptions {
             num_memtable_limit: 2,
             serializable: false,
             compression_options: CompressionOptions::Snappy,
+            num_compaction_thread_limit: 10,
         }
     }
 }
@@ -157,6 +162,8 @@ pub(crate) struct LsmStorageInner {
     pub(crate) manifest: Option<Manifest>,
     pub(crate) mvcc: Option<LsmMvccInner>,
     pub(crate) compaction_filters: Arc<Mutex<Vec<CompactionFilter>>>,
+    pub(crate) running_compaction: Mutex<HashSet<usize>>,
+    pub(crate) active_compactions: Arc<AtomicUsize>,
 }
 
 /// A thin wrapper for `LsmStorageInner` and the user interface for MiniLSM.
@@ -168,8 +175,8 @@ pub struct MiniLsm {
     flush_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Notifies the compaction thread to stop working. (In week 2)
     compaction_notifier: crossbeam_channel::Sender<()>,
-    /// The handle for the compaction thread. (In week 2)
-    compaction_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    compaction_scheduler: Mutex<Option<std::thread::JoinHandle<()>>>,
+    compaction_pool: Arc<ThreadPool>,
 }
 
 impl Drop for MiniLsm {
@@ -182,15 +189,33 @@ impl Drop for MiniLsm {
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
         self.inner.sync_dir()?;
+
+        // 停止调度新任务
         self.compaction_notifier.send(()).ok();
         self.flush_notifier.send(()).ok();
 
-        let mut compaction_thread = self.compaction_thread.lock();
+        // 等待调度线程结束（不再提交新任务）
+        let mut compaction_thread = self.compaction_scheduler.lock();
         if let Some(compaction_thread) = compaction_thread.take() {
             compaction_thread
                 .join()
                 .map_err(|e| anyhow::anyhow!("{:?}", e))?;
         }
+
+        // 等待所有活跃的压缩任务完成
+        let start_time = std::time::Instant::now();
+        let timeout = Duration::from_secs(30); // 设置超时避免无限等待
+
+        while self.inner.active_compactions.load(Ordering::Acquire) > 0 {
+            if start_time.elapsed() > timeout {
+                eprintln!("Warning: Compaction tasks didn't finish within timeout");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        println!("All compaction tasks completed, shutting down thread pool");
+
         let mut flush_thread = self.flush_thread.lock();
         if let Some(flush_thread) = flush_thread.take() {
             flush_thread
@@ -226,9 +251,17 @@ impl MiniLsm {
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
     /// not exist.
     pub fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Arc<Self>> {
+        let compaction_thread_nums = &options.num_compaction_thread_limit;
+        let compaction_pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(*compaction_thread_nums)
+                .build()?,
+        );
+
         let inner = Arc::new(LsmStorageInner::open(path, options)?);
         let (tx1, rx) = crossbeam_channel::unbounded();
-        let compaction_thread = inner.spawn_compaction_thread(rx)?;
+        let compaction_scheduler =
+            inner.spawn_compaction_scheduler_thread(rx, compaction_pool.clone())?;
         let (tx2, rx) = crossbeam_channel::unbounded();
         let flush_thread = inner.spawn_flush_thread(rx)?;
         Ok(Arc::new(Self {
@@ -236,7 +269,8 @@ impl MiniLsm {
             flush_notifier: tx2,
             flush_thread: Mutex::new(flush_thread),
             compaction_notifier: tx1,
-            compaction_thread: Mutex::new(compaction_thread),
+            compaction_scheduler: Mutex::new(compaction_scheduler),
+            compaction_pool,
         }))
     }
 
@@ -436,6 +470,8 @@ impl LsmStorageInner {
             next_sst_id += 1;
             manifest = m;
         }
+        let active_compactions: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
             state_lock: Mutex::new(()),
@@ -443,11 +479,13 @@ impl LsmStorageInner {
             block_cache,
             next_sst_id: AtomicUsize::new(next_sst_id),
             compaction_controller,
+            running_compaction: Mutex::new(HashSet::new()),
             manifest: Some(manifest),
             options: options.into(),
             mvcc: Some(LsmMvccInner::new(last_commit_ts)),
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
             compression_options,
+            active_compactions,
         };
         storage.sync_dir()?;
 

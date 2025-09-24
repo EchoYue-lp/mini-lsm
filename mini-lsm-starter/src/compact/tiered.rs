@@ -37,6 +37,7 @@ pub struct TieredCompactionOptions {
     pub max_merge_width: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
 pub struct TieredCompactionController {
     options: TieredCompactionOptions,
 }
@@ -46,6 +47,21 @@ impl TieredCompactionController {
         Self { options }
     }
 
+    ///  tiered compaction
+    /// 1、空间放大触发（Space Amplification Trigger） —— 最高优先级
+    ///     条件：(所有层的总大小 - 最底层大小) / 最底层大小 >= max_size_amplification_percent * 1%
+    ///     策略：全量压缩
+    ///     目的：防止上层数据太多，浪费空间。
+    ///
+    /// 2、大小比例触发（Size Ratio Trigger） —— 中优先级
+    ///     条件：当前层大小 / 之前所有层总大小 > (100 + size_ratio) * 1%
+    ///     策略：
+    ///     目的：维持层间大小比例，避免小层过多 → 降低读放大。
+    /// 3、层数限制触发（Major Compaction / Reduce Sorted Runs） —— 最低优先级
+    ///     条件：如果以上两种都没触发，但当前层数 > num_tiers，则合并前 max_merge_tiers 个层，减少总层数。
+    ///     策略：
+    ///     目的：控制最大层数，避免读放大爆炸（每层都要查）。
+    ///
     pub fn generate_compaction_task(
         &self,
         snapshot: &LsmStorageState,
@@ -62,8 +78,6 @@ impl TieredCompactionController {
         for id in 0..(snapshot.levels.len() - 1) {
             size += snapshot.levels[id].1.len();
         }
-        // 这意味着如果“较新数据”的总大小超过了“最旧数据”大小的某个比例（默认 200%），说明空间放大很严重，
-        // 需要通过一次大合并来清理过期数据。这是最彻底的压缩方式。
         let space_amplification_ratio =
             (size as f64) / (snapshot.levels.last().unwrap().1.len() as f64) * 100.0;
         if space_amplification_ratio >= self.options.max_size_amplification_percent as f64 {
@@ -72,14 +86,10 @@ impl TieredCompactionController {
                 space_amplification_ratio
             );
             return Some(TieredCompactionTask {
-                // 要压缩所有的
                 tiers: snapshot.levels.clone(),
                 bottom_tier_included: true,
             });
         }
-        // size_ratio 定义了文件大小差异的容忍度，从最新的文件开始向后查找（File_i 到 File_{i+1}, File_{i+2}...），
-        // 如果连续的文件大小与第一个文件 File_i 的比例差距在 size_ratio 以内，则继续。
-        // 当找到第一个不满足该条件的文件时，停止并将之前的所有文件合并。
         let size_ratio_trigger = (100.0 + self.options.size_ratio as f64) / 100.0;
         let mut size = 0;
         for id in 0..(snapshot.levels.len() - 1) {

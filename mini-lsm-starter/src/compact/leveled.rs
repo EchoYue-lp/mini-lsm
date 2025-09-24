@@ -42,6 +42,7 @@ pub struct LeveledCompactionOptions {
     pub base_level_size_mb: usize,
 }
 
+#[derive(Debug, Clone)]
 pub struct LeveledCompactionController {
     options: LeveledCompactionOptions,
 }

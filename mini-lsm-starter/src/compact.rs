@@ -18,6 +18,7 @@ mod tiered;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 pub(crate) use crate::compact::leveled::LeveledTaskType;
@@ -31,6 +32,7 @@ use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 use anyhow::Result;
 pub use leveled::{LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask};
+use rayon::ThreadPool;
 use serde::{Deserialize, Serialize};
 pub use simple_leveled::{
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, SimpleLeveledCompactionTask,
@@ -59,6 +61,7 @@ impl CompactionTask {
     }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) enum CompactionController {
     Leveled(LeveledCompactionController),
     Tiered(TieredCompactionController),
@@ -102,7 +105,10 @@ impl CompactionController {
             (CompactionController::Tiered(ctrl), CompactionTask::Tiered(task)) => {
                 ctrl.apply_compaction_result(snapshot, task, output)
             }
-            _ => unreachable!(),
+            _ => unreachable!(
+                "Unsupported compaction controller and task combination: controller={:?}, task={:?}",
+                self, task
+            ),
         }
     }
 }
@@ -127,6 +133,23 @@ pub enum CompactionOptions {
     Simple(SimpleLeveledCompactionOptions),
     /// In no compaction mode (week 1), always flush to L0
     NoCompaction,
+}
+
+struct CompactionTaskGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl CompactionTaskGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::Acquire);
+        Self { counter }
+    }
+}
+
+impl Drop for CompactionTaskGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Release);
+    }
 }
 
 impl LsmStorageInner {
@@ -186,8 +209,7 @@ impl LsmStorageInner {
                         .windows(2)
                         .all(|w| w[0].last_key() < w[1].first_key())
                     {
-                        let lower_iter =
-                            SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
+                        let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
                         self.compact_generate_sst_from_iter(
                             TwoMergeIterator::create(upper_iter, lower_iter)?,
                             task.compact_to_bottom_level(),
@@ -222,8 +244,7 @@ impl LsmStorageInner {
                         .windows(2)
                         .all(|w| w[0].last_key() < w[1].first_key())
                     {
-                        let lower_iter =
-                            SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
+                        let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
                         self.compact_generate_sst_from_iter(
                             TwoMergeIterator::create(upper_iter, lower_iter)?,
                             task.compact_to_bottom_level(),
@@ -313,30 +334,6 @@ impl LsmStorageInner {
         println!("force full compaction done, new SSTs: {:?}", ids);
 
         Ok(())
-    }
-
-    fn trigger_compaction(&self) -> Result<()> {
-        let snapshot = {
-            let guard = self.state.read();
-            guard.clone()
-        };
-        let task = self
-            .compaction_controller
-            .generate_compaction_task(&snapshot);
-
-        let Some(task) = task else { return Ok(()) };
-
-        match task {
-            CompactionTask::Leveled(leveled_task)
-                if matches!(
-                    leveled_task.leveled_task_type,
-                    LeveledTaskType::TrivialMoveTask
-                ) =>
-            {
-                self.trivial_move(leveled_task)
-            }
-            _ => self.trigger_merge_compaction(task),
-        }
     }
 
     // trivial move 的主逻辑：不做文件读写，只更新元数据，并按与普通合并一致的流程持久化。
@@ -460,9 +457,10 @@ impl LsmStorageInner {
         Ok(())
     }
 
-    pub(crate) fn spawn_compaction_thread(
+    pub(crate) fn spawn_compaction_scheduler_thread(
         self: &Arc<Self>,
         rx: crossbeam_channel::Receiver<()>,
+        compaction_pool: Arc<ThreadPool>,
     ) -> Result<Option<std::thread::JoinHandle<()>>> {
         if let CompactionOptions::Leveled(_)
         | CompactionOptions::Simple(_)
@@ -470,19 +468,104 @@ impl LsmStorageInner {
         {
             let this = self.clone();
             let handle = std::thread::spawn(move || {
-                let ticker = crossbeam_channel::tick(Duration::from_millis(50));
+                let ticker = crossbeam_channel::tick(Duration::from_millis(25));
                 loop {
                     crossbeam_channel::select! {
-                        recv(ticker) -> _ => if let Err(e) = this.trigger_compaction() {
-                            eprintln!("compaction failed: {}", e);
+                        recv(ticker) -> _ => {
+                            let this_clone = this.clone();
+                            let pool = compaction_pool.clone();
+                            pool.spawn(move || {
+                                let _guard = CompactionTaskGuard::new(this_clone.active_compactions.clone());
+                                match this_clone.try_one_compaction() {
+                                    Ok(true) => {
+                                        println!("compact success.");
+                                    }
+                                    Ok(false) => {
+                                        println!("No compaction needed.");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("parallel compaction worker error: {}", e);
+                                    }
+                                }
+                            });
                         },
-                        recv(rx) -> _ => return
+                        recv(rx) -> _ => return,
                     }
                 }
             });
             return Ok(Some(handle));
         }
         Ok(None)
+    }
+
+    // Try to pick and run one compaction task while ensuring no conflicting levels run in parallel.
+    fn try_one_compaction(&self) -> Result<bool> {
+        let snapshot = {
+            let guard = self.state.read();
+            guard.clone()
+        };
+        let Some(task) = self
+            .compaction_controller
+            .generate_compaction_task(&snapshot)
+        else {
+            return Ok(false);
+        };
+
+        // Determine involved levels for conflict detection.
+        let mut involved = HashSet::new();
+        match &task {
+            CompactionTask::Leveled(t) => {
+                involved.insert(t.lower_level);
+                involved.insert(t.upper_level.unwrap_or(0));
+            }
+            CompactionTask::Simple(t) => {
+                involved.insert(t.lower_level);
+                involved.insert(t.upper_level.unwrap_or(0));
+            }
+            CompactionTask::Tiered(t) => {
+                for (lvl, _) in &t.tiers {
+                    involved.insert(*lvl);
+                }
+            }
+            CompactionTask::ForceFullCompaction { .. } => {
+                // Not used with background compaction
+                return Ok(false);
+            }
+        }
+
+        // Try to reserve levels; if conflicted, skip this round.
+        {
+            let mut running = self.running_compaction.lock();
+            if involved.iter().any(|lvl| running.contains(lvl)) {
+                return Ok(false);
+            }
+            for lvl in &involved {
+                running.insert(*lvl);
+            }
+        }
+
+        // Run the selected task, then release the reservation.
+        let task_owned = task;
+        let res = match task_owned {
+            CompactionTask::Leveled(leveled_task)
+                if matches!(
+                    leveled_task.leveled_task_type,
+                    LeveledTaskType::TrivialMoveTask
+                ) =>
+            {
+                self.trivial_move(leveled_task)
+            }
+            other => self.trigger_merge_compaction(other),
+        };
+        // Release
+        {
+            let mut running = self.running_compaction.lock();
+            for lvl in involved {
+                running.remove(&lvl);
+            }
+        }
+        res?;
+        Ok(true)
     }
 
     fn trigger_flush(&self) -> Result<()> {

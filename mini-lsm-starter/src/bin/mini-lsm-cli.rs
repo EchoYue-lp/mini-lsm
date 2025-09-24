@@ -20,6 +20,7 @@ use wrapper::mini_lsm_wrapper;
 use anyhow::Result;
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
+use mini_lsm_starter::compression::CompressionOptions;
 use mini_lsm_wrapper::compact::{
     CompactionOptions, LeveledCompactionOptions, SimpleLeveledCompactionOptions,
     TieredCompactionOptions,
@@ -28,7 +29,6 @@ use mini_lsm_wrapper::iterators::StorageIterator;
 use mini_lsm_wrapper::lsm_storage::{LsmStorageOptions, MiniLsm};
 use std::path::PathBuf;
 use std::sync::Arc;
-use mini_lsm_starter::compression::CompressionOptions;
 
 #[derive(Debug, Clone, ValueEnum)]
 enum CompactionStrategy {
@@ -369,6 +369,7 @@ fn main() -> Result<()> {
                     })
                 }
             },
+            num_compaction_thread_limit: 2,
             enable_wal: args.enable_wal,
             serializable: args.serializable,
             compression_options: match args.compression {
@@ -376,7 +377,7 @@ fn main() -> Result<()> {
                 CompressionStrategy::Lz4 => CompressionOptions::Lz4,
                 CompressionStrategy::Gz => CompressionOptions::Gz,
                 CompressionStrategy::None => CompressionOptions::None,
-            }
+            },
         },
     )?;
 
