@@ -349,12 +349,6 @@ impl LsmStorageInner {
         let moved_sst = outputs[0];
         let target_level = task.lower_level;
 
-        // 记录日志，便于调试
-        println!(
-            "Trivial move: {} from {:?} to level {}",
-            moved_sst, task.upper_level, target_level
-        );
-
         // 在与其它状态更新串行的临界区内，基于最新快照应用变更并写入 manifest。
         let state_lock = self.state_lock.lock();
 
@@ -378,6 +372,12 @@ impl LsmStorageInner {
             // 当前已出现重叠，说明该 trivial move 任务已过期，跳过本次移动，留待下一轮生成正确的合并任务。
             return Ok(());
         }
+
+        // 记录日志，便于调试
+        println!(
+            "Trivial move: {} from {:?} to level {}",
+            moved_sst, task.upper_level, target_level
+        );
 
         // 2) 仍然满足无重叠，应用元数据变更（复用 leveled 的 apply_compaction_result 保持一致性）。
         let (new_snapshot, _files_to_remove) = match &self.compaction_controller {
@@ -476,17 +476,9 @@ impl LsmStorageInner {
                             let pool = compaction_pool.clone();
                             pool.spawn(move || {
                                 let _guard = CompactionTaskGuard::new(this_clone.active_compactions.clone());
-                                match this_clone.try_one_compaction() {
-                                    Ok(true) => {
-                                        println!("compact success.");
-                                    }
-                                    Ok(false) => {
-                                        println!("No compaction needed.");
-                                    }
-                                    Err(e) => {
-                                        eprintln!("parallel compaction worker error: {}", e);
-                                    }
-                                }
+                                     if let Err(e) = this_clone.try_one_compaction() {
+                                         eprintln!("parallel compaction worker error: {}", e);
+                                     }
                             });
                         },
                         recv(rx) -> _ => return,

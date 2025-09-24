@@ -82,6 +82,31 @@ impl LeveledCompactionController {
         overlap_ssts
     }
 
+    ///
+    /// ### Leveled Compaction 触发逻辑
+    ///
+    /// 1. **检查 L0 是否需要压缩？**
+    ///    - **如果** L0 中的 SST 文件数量 ≥ `level0_file_num_compaction_trigger` 阈值：
+    ///      - **执行 L0 与第一个 `target_size > 0` 的层进行 compaction。**
+    ///        - 注意：不是固定的 L1，而是找到第一个有数据的目标层。
+    ///    - **否则**（L0 不触发 compaction）：
+    ///      - **继续检查 L1 到 L_{n-1} 各层的过载比例**（即 `current_size / target_size`）。
+    ///
+    /// 2. **计算 L1 到 L_{n-1} 各层的过载比例**：
+    ///    - 对每一层 L_i（i ≥ 1），计算其过载比例：
+    ///
+    ///      `overload_ratio = current_size_of_Li / target_size_of_Li`
+    ///
+    ///    - **如果存在某层的 `overload_ratio > 1.0`**：
+    ///      - **选择 `overload_ratio` 最大的那一层 L_i** 进行 compaction。
+    ///        - 从该层（L_i）中选择一个 SST（通常是 oldest）。
+    ///        - 找到下一层（L_{i+1}）中与之 key 范围重叠的所有 SST。
+    ///        - 将这些 SST 合并，并写入 L_{i+1}。
+    ///    - **如果没有层的 `overload_ratio > 1.0`**：
+    ///      - **不触发任何 compaction**。
+    ///
+    ///
+
     pub fn generate_compaction_task(
         &self,
         snapshot: &LsmStorageState,
@@ -250,12 +275,9 @@ impl LeveledCompactionController {
             snapshot.l0_sstables = new_l0_ssts;
         }
 
-        match task.leveled_task_type {
-            LeveledTaskType::MergeCompactionTask => {
-                files_to_remove.extend(&task.upper_level_sst_ids);
-                files_to_remove.extend(&task.lower_level_sst_ids);
-            }
-            _ => {}
+        if let LeveledTaskType::MergeCompactionTask = task.leveled_task_type {
+            files_to_remove.extend(&task.upper_level_sst_ids);
+            files_to_remove.extend(&task.lower_level_sst_ids);
         }
 
         let mut new_lower_level_ssts = snapshot.levels[task.lower_level - 1]

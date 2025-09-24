@@ -189,7 +189,7 @@ fn test_trivial_move_recovery() {
     println!("1. 插入数据并触发 trivial move compaction...");
 
     // 第一批数据：key0000-key9999
-    for i in 0..10000 {
+    for i in 0..100000 {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
         let value = vec![i as u8; 1024 * 16]; // 512B 的值
         storage.put(&key, &value).unwrap();
@@ -202,7 +202,7 @@ fn test_trivial_move_recovery() {
         .unwrap();
 
     // 第二批数据：key10000-key11999（不与第一批重叠）
-    for i in 10000..12000 {
+    for i in 100000..120000 {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
         let value = vec![i as u8; 1024 * 16];
         storage.put(&key, &value).unwrap();
@@ -230,7 +230,7 @@ fn test_trivial_move_recovery() {
 
     println!("3. 验证数据完整性...");
     let mut found_count = 0;
-    for i in 5010..5130 {
+    for i in 50100..51300 {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
         let result = storage.get(&key).unwrap();
         if let Some(value) = result {
@@ -238,7 +238,7 @@ fn test_trivial_move_recovery() {
             found_count += 1;
         }
     }
-    assert_eq!(found_count, 120, "应该找到所有 120 个键");
+    assert_eq!(found_count, 1200, "应该找到所有 120 个键");
 
     // 强制同步确保数据持久化
     storage.sync().unwrap();
@@ -256,7 +256,7 @@ fn test_trivial_move_recovery() {
 
     // 验证恢复后的数据
     let mut found_count = 0;
-    for i in 6010..6130 {
+    for i in 60100..61300 {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
         let result = storage.get(&key).unwrap();
         if let Some(value) = result {
@@ -264,7 +264,7 @@ fn test_trivial_move_recovery() {
             found_count += 1;
         }
     }
-    assert_eq!(found_count, 120, "恢复后应该找到所有 120 个键");
+    assert_eq!(found_count, 1200, "恢复后应该找到所有 120 个键");
 
     println!("5. 插入新数据验证系统仍然正常工作...");
     for i in 10000..11025 {
@@ -274,7 +274,7 @@ fn test_trivial_move_recovery() {
     }
 
     // 验证新数据
-    for i in 10020..10030 {
+    for i in 100200..100300 {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
         let result = storage.get(&key).unwrap();
         assert!(result.is_some(), "新插入的键应该存在");

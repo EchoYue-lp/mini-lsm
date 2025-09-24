@@ -14,9 +14,8 @@
 
 use crate::block::Block;
 use crate::compact::{
-    CompactionController, CompactionOptions, CompactionTask, LeveledCompactionController,
-    LeveledCompactionOptions, LeveledTaskType, SimpleLeveledCompactionController,
-    SimpleLeveledCompactionOptions, TieredCompactionController,
+    CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
+    SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
 use crate::compression::CompressionOptions;
 use crate::iterators::StorageIterator;
@@ -176,7 +175,7 @@ pub struct MiniLsm {
     /// Notifies the compaction thread to stop working. (In week 2)
     compaction_notifier: crossbeam_channel::Sender<()>,
     compaction_scheduler: Mutex<Option<std::thread::JoinHandle<()>>>,
-    compaction_pool: Arc<ThreadPool>,
+    _compaction_pool: Arc<ThreadPool>,
 }
 
 impl Drop for MiniLsm {
@@ -270,7 +269,7 @@ impl MiniLsm {
             flush_thread: Mutex::new(flush_thread),
             compaction_notifier: tx1,
             compaction_scheduler: Mutex::new(compaction_scheduler),
-            compaction_pool,
+            _compaction_pool: compaction_pool,
         }))
     }
 
@@ -773,7 +772,6 @@ impl LsmStorageInner {
                 snapshot.levels.insert(0, (sst_id, vec![sst_id]))
             }
 
-            println!("flushed {}.sst with size={}", sst_id, sst.table_size());
             snapshot.sstables.insert(sst_id, sst);
             *guard = Arc::new(snapshot);
         }
