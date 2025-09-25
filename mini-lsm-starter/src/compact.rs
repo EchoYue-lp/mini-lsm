@@ -17,6 +17,7 @@ mod simple_leveled;
 mod tiered;
 
 use std::collections::HashSet;
+use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -26,7 +27,7 @@ use crate::iterators::StorageIterator;
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
-use crate::key::KeySlice;
+use crate::key::{KeyBytes, KeySlice};
 use crate::lsm_storage::{CompactionFilter, LsmStorageInner, LsmStorageState};
 use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
@@ -203,28 +204,11 @@ impl LsmStorageInner {
                     for id in lower_level_sst_ids.iter() {
                         lower_ssts.push(snapshot.sstables.get(id).unwrap().clone());
                     }
-                    // SstConcatIterator assumes non-overlapping tables; under races/recovery,
-                    // transient overlaps can appear, so we conservatively fall back.
-                    if lower_ssts
-                        .windows(2)
-                        .all(|w| w[0].last_key() < w[1].first_key())
-                    {
-                        let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
-                        self.compact_generate_sst_from_iter(
-                            TwoMergeIterator::create(upper_iter, lower_iter)?,
-                            task.compact_to_bottom_level(),
-                        )
-                    } else {
-                        let mut iters = Vec::with_capacity(lower_ssts.len());
-                        for sst in lower_ssts.into_iter() {
-                            iters.push(Box::new(SsTableIterator::create_and_seek_to_first(sst)?));
-                        }
-                        let lower_iter = MergeIterator::create(iters);
-                        self.compact_generate_sst_from_iter(
-                            TwoMergeIterator::create(upper_iter, lower_iter)?,
-                            task.compact_to_bottom_level(),
-                        )
-                    }
+                    let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
+                    self.compact_generate_sst_from_iter(
+                        TwoMergeIterator::create(upper_iter, lower_iter)?,
+                        task.compact_to_bottom_level(),
+                    )
                 }
                 None => {
                     let mut upper_iters = Vec::with_capacity(upper_level_sst_ids.len());
@@ -238,28 +222,11 @@ impl LsmStorageInner {
                     for id in lower_level_sst_ids.iter() {
                         lower_ssts.push(snapshot.sstables.get(id).unwrap().clone());
                     }
-                    // If lower-level SSTs overlap, fall back to MergeIterator to avoid
-                    // SstConcatIterator invariants (non-overlapping) being violated.
-                    if lower_ssts
-                        .windows(2)
-                        .all(|w| w[0].last_key() < w[1].first_key())
-                    {
-                        let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
-                        self.compact_generate_sst_from_iter(
-                            TwoMergeIterator::create(upper_iter, lower_iter)?,
-                            task.compact_to_bottom_level(),
-                        )
-                    } else {
-                        let mut iters = Vec::with_capacity(lower_ssts.len());
-                        for sst in lower_ssts.into_iter() {
-                            iters.push(Box::new(SsTableIterator::create_and_seek_to_first(sst)?));
-                        }
-                        let lower_iter = MergeIterator::create(iters);
-                        self.compact_generate_sst_from_iter(
-                            TwoMergeIterator::create(upper_iter, lower_iter)?,
-                            task.compact_to_bottom_level(),
-                        )
-                    }
+                    let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
+                    self.compact_generate_sst_from_iter(
+                        TwoMergeIterator::create(upper_iter, lower_iter)?,
+                        task.compact_to_bottom_level(),
+                    )
                 }
             },
             CompactionTask::Tiered(TieredCompactionTask { tiers, .. }) => {

@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::lsm_storage::LsmStorageState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-
-use crate::lsm_storage::LsmStorageState;
+use std::fmt::Debug;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LeveledTaskType {
@@ -141,37 +141,15 @@ impl LeveledCompactionController {
 
         if snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
             println!("flush L0 SST to base level {}", base_level);
-
-            let upper_level_sst_ids = snapshot.l0_sstables.clone();
-            let mut all_overlap_ssts = Vec::new();
-            let mut all_upper_level_ssts = Vec::new();
-
-            for upper_level_sst_id in upper_level_sst_ids {
-                let this_one_overlap_ssts =
-                    self.find_overlapping_ssts(snapshot, &[upper_level_sst_id], base_level);
-
-                if this_one_overlap_ssts.is_empty() {
-                    return Some(LeveledCompactionTask {
-                        upper_level: None,
-                        upper_level_sst_ids: vec![upper_level_sst_id],
-                        lower_level: base_level,
-                        lower_level_sst_ids: this_one_overlap_ssts,
-                        is_lower_level_bottom_level: base_level == self.options.max_levels,
-                        leveled_task_type: LeveledTaskType::TrivialMoveTask,
-                    });
-                } else {
-                    all_overlap_ssts.extend(this_one_overlap_ssts);
-                    all_upper_level_ssts.push(upper_level_sst_id);
-                }
-            }
-            all_overlap_ssts.sort();
-            all_overlap_ssts.dedup();
-
             return Some(LeveledCompactionTask {
                 upper_level: None,
-                upper_level_sst_ids: all_upper_level_ssts,
+                upper_level_sst_ids: snapshot.l0_sstables.clone(),
                 lower_level: base_level,
-                lower_level_sst_ids: all_overlap_ssts,
+                lower_level_sst_ids: self.find_overlapping_ssts(
+                    snapshot,
+                    &snapshot.l0_sstables,
+                    base_level,
+                ),
                 is_lower_level_bottom_level: base_level == self.options.max_levels,
                 leveled_task_type: LeveledTaskType::MergeCompactionTask,
             });
