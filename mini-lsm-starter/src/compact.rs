@@ -26,6 +26,7 @@ pub(crate) use crate::compact::leveled::LeveledTaskType;
 use crate::iterators::StorageIterator;
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::range_limiter::RangeLimiter;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::{KeyBytes, KeySlice};
 use crate::lsm_storage::{CompactionFilter, LsmStorageInner, LsmStorageState};
@@ -34,6 +35,8 @@ use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 use anyhow::Result;
 pub use leveled::{LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask};
 use rayon::ThreadPool;
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::{IndexedParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 pub use simple_leveled::{
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, SimpleLeveledCompactionTask,
@@ -199,11 +202,36 @@ impl LsmStorageInner {
                     for id in upper_level_sst_ids.iter() {
                         upper_ssts.push(snapshot.sstables.get(id).unwrap().clone());
                     }
-                    let upper_iter = SstConcatIterator::create_and_seek_to_first(upper_ssts)?;
                     let mut lower_ssts = Vec::with_capacity(lower_level_sst_ids.len());
                     for id in lower_level_sst_ids.iter() {
                         lower_ssts.push(snapshot.sstables.get(id).unwrap().clone());
                     }
+
+                    // 尝试Subcompaction
+                    if self.options.num_subcompactions > 1 {
+                        // if let Err(e) = self.try_subcompaction(&upper_ssts, &lower_ssts, task) {
+                        //     eprintln!(
+                        //         "Subcompaction failed, fallback to normal compaction: {}",
+                        //         e
+                        //     );
+                        // }
+
+                        match self.try_subcompaction(&upper_ssts, &lower_ssts, task) {
+                            Ok(Some(result)) => return Ok(result),
+                            Ok(None) => {
+                                // Fallback到普通compaction
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Subcompaction failed, fallback to normal compaction: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+
+                    // 普通compaction fallback
+                    let upper_iter = SstConcatIterator::create_and_seek_to_first(upper_ssts)?;
                     let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
                     self.compact_generate_sst_from_iter(
                         TwoMergeIterator::create(upper_iter, lower_iter)?,
@@ -217,11 +245,35 @@ impl LsmStorageInner {
                             snapshot.sstables.get(id).unwrap().clone(),
                         )?));
                     }
-                    let upper_iter = MergeIterator::create(upper_iters);
                     let mut lower_ssts = Vec::with_capacity(lower_level_sst_ids.len());
                     for id in lower_level_sst_ids.iter() {
                         lower_ssts.push(snapshot.sstables.get(id).unwrap().clone());
                     }
+
+                    // 对于L0->L1的compaction，upper level是迭代器形式
+                    // 需要将其转换为SST以支持subcompaction
+                    if self.options.num_subcompactions > 1 {
+                        let upper_ssts: Vec<Arc<SsTable>> = upper_level_sst_ids
+                            .iter()
+                            .map(|id| snapshot.sstables.get(id).unwrap().clone())
+                            .collect();
+
+                        match self.try_subcompaction(&upper_ssts, &lower_ssts, task) {
+                            Ok(Some(result)) => return Ok(result),
+                            Ok(None) => {
+                                // Fallback到普通compaction
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Subcompaction failed, fallback to normal compaction: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+
+                    // 普通compaction fallback
+                    let upper_iter = MergeIterator::create(upper_iters);
                     let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
                     self.compact_generate_sst_from_iter(
                         TwoMergeIterator::create(upper_iter, lower_iter)?,
@@ -244,6 +296,261 @@ impl LsmStorageInner {
                 )
             }
         }
+    }
+
+    /// 基于key分布计算Subcompaction边界，参考RocksDB算法
+    fn find_subcompaction_boundaries(
+        &self,
+        input_ssts: &[Arc<SsTable>],
+    ) -> Result<Vec<(Option<KeyBytes>, Option<KeyBytes>)>> {
+        if input_ssts.is_empty() || self.options.num_subcompactions <= 1 {
+            return Ok(vec![(None, None)]);
+        }
+
+        // 采样每个SST文件的key点，类似RocksDB的anchor point算法
+        let mut anchor_points = Vec::new();
+
+        for sst in input_ssts {
+            let mut sample_keys = Vec::new();
+
+            // 始终包含首尾key
+            sample_keys.push(sst.first_key().clone());
+            sample_keys.push(sst.last_key().clone());
+
+            // 从block metadata中采样中间key，最多128个采样点
+            let block_count = sst.block_meta.len();
+            if block_count > 2 {
+                let sample_step = std::cmp::max(1, block_count / 64); // 最多采样64个中间点
+                for (i, block_meta) in sst.block_meta.iter().enumerate() {
+                    if i % sample_step == 0 && i > 0 && i < block_count - 1 {
+                        sample_keys.push(block_meta.first_key.clone());
+                    }
+                }
+            }
+
+            anchor_points.extend(sample_keys);
+        }
+
+        // 排序并去重
+        anchor_points.sort();
+        anchor_points.dedup();
+
+        if anchor_points.len() <= 1 {
+            return Ok(vec![(None, None)]);
+        }
+
+        // 计算合适的子任务数量，不超过配置的最大值
+        let effective_subcompactions = std::cmp::min(
+            self.options.num_subcompactions,
+            anchor_points.len().saturating_sub(1),
+        );
+
+        if effective_subcompactions <= 1 {
+            return Ok(vec![(None, None)]);
+        }
+
+        // 按等距原则选择分割点
+        let mut boundaries = Vec::new();
+        let step = anchor_points.len() / effective_subcompactions;
+
+        let mut start: Option<KeyBytes> = None;
+        for i in (step..anchor_points.len()).step_by(step) {
+            if boundaries.len() >= effective_subcompactions - 1 {
+                break;
+            }
+            let end = Some(anchor_points[i].clone());
+            boundaries.push((start.clone(), end.clone()));
+            start = end;
+        }
+
+        // 最后一个范围到末尾
+        boundaries.push((start, None));
+
+        Ok(boundaries)
+    }
+
+    /// 检查SST是否与指定key范围重叠
+    fn sst_overlaps_range(
+        sst: &Arc<SsTable>,
+        start: &Option<KeyBytes>,
+        end: &Option<KeyBytes>,
+    ) -> bool {
+        let sst_first = sst.first_key();
+        let sst_last = sst.last_key();
+
+        let after_start = start.as_ref().is_none_or(|s| sst_last >= s);
+        let before_end = end.as_ref().is_none_or(|e| sst_first < e);
+
+        after_start && before_end
+    }
+
+    /// 尝试执行Subcompaction，如果可行返回结果，否则返回None进行fallback
+    fn try_subcompaction(
+        &self,
+        upper_ssts: &[Arc<SsTable>],
+        lower_ssts: &[Arc<SsTable>],
+        task: &CompactionTask,
+    ) -> Result<Option<Vec<Arc<SsTable>>>> {
+        // 计算分割边界：同时考虑 upper 与 lower 键分布更稳妥
+        let mut all_inputs = Vec::new();
+        all_inputs.extend_from_slice(upper_ssts);
+        all_inputs.extend_from_slice(lower_ssts);
+        let boundaries = self.find_subcompaction_boundaries(&all_inputs)?;
+
+        // 如果只有一个边界，不值得进行subcompaction
+        if boundaries.len() <= 1 {
+            return Ok(None);
+        }
+
+        println!("Starting subcompaction with {} sub-tasks", boundaries.len());
+
+        // 并行执行子任务
+        let work = || -> Result<Vec<Vec<Arc<SsTable>>>> {
+            boundaries
+                .par_iter()
+                .enumerate()
+                .map(|(i, (start_key, end_key))| {
+                    // 过滤出与当前范围重叠的SST
+                    let mut filtered_upper: Vec<_> = upper_ssts
+                        .iter()
+                        .filter(|sst| Self::sst_overlaps_range(sst, start_key, end_key))
+                        .cloned()
+                        .collect();
+                    let mut filtered_lower: Vec<_> = lower_ssts
+                        .iter()
+                        .filter(|sst| Self::sst_overlaps_range(sst, start_key, end_key))
+                        .cloned()
+                        .collect();
+                    // 为满足 concat 的严格要求，确保按 first_key 排序（对 L1+ 层天然成立，这里显式保证）
+                    filtered_upper.sort_by(|a, b| a.first_key().cmp(b.first_key()));
+                    filtered_lower.sort_by(|a, b| a.first_key().cmp(b.first_key()));
+
+                    // 如果没有数据需要合并，跳过这个子任务
+                    if filtered_upper.is_empty() && filtered_lower.is_empty() {
+                        return Ok(Vec::new());
+                    }
+
+                    println!(
+                        "Subcompaction {}: {} upper SSTs, {} lower SSTs",
+                        i,
+                        filtered_upper.len(),
+                        filtered_lower.len()
+                    );
+
+                    // 创建迭代器并执行合并：每个子任务严格限制在 [start, end)
+                    let result = {
+                        // 判断 upper 是否为严格有序无重叠（L1+）
+                        let mut upper_is_ordered = true;
+                        for w in filtered_upper.windows(2) {
+                            if w[0].last_key() >= w[1].first_key() {
+                                upper_is_ordered = false;
+                                break;
+                            }
+                        }
+
+                        let lower_iter_range = if filtered_lower.is_empty() {
+                            None
+                        } else {
+                            let base = if let Some(sk) = start_key {
+                                SstConcatIterator::create_and_seek_to_key(
+                                    filtered_lower.clone(),
+                                    sk.as_key_slice(),
+                                )?
+                            } else {
+                                SstConcatIterator::create_and_seek_to_first(filtered_lower.clone())?
+                            };
+                            Some(RangeLimiter::new(base, start_key.clone(), end_key.clone()))
+                        };
+
+                        if filtered_upper.is_empty() {
+                            if let Some(lower) = lower_iter_range {
+                                self.compact_generate_sst_from_iter(
+                                    lower,
+                                    task.compact_to_bottom_level(),
+                                )?
+                            } else {
+                                Vec::new()
+                            }
+                        } else if upper_is_ordered {
+                            let base = if let Some(sk) = start_key {
+                                SstConcatIterator::create_and_seek_to_key(
+                                    filtered_upper.clone(),
+                                    sk.as_key_slice(),
+                                )?
+                            } else {
+                                SstConcatIterator::create_and_seek_to_first(filtered_upper.clone())?
+                            };
+                            let upper_range =
+                                RangeLimiter::new(base, start_key.clone(), end_key.clone());
+                            if let Some(lower) = lower_iter_range {
+                                let merged_iter = TwoMergeIterator::create(upper_range, lower)?;
+                                self.compact_generate_sst_from_iter(
+                                    merged_iter,
+                                    task.compact_to_bottom_level(),
+                                )?
+                            } else {
+                                self.compact_generate_sst_from_iter(
+                                    upper_range,
+                                    task.compact_to_bottom_level(),
+                                )?
+                            }
+                        } else {
+                            // L0：对每个 SST 单独 seek，再 merge
+                            let mut iters = Vec::new();
+                            for sst in &filtered_upper {
+                                let it = if let Some(sk) = start_key {
+                                    SsTableIterator::create_and_seek_to_key(
+                                        sst.clone(),
+                                        sk.as_key_slice(),
+                                    )?
+                                } else {
+                                    SsTableIterator::create_and_seek_to_first(sst.clone())?
+                                };
+                                iters.push(Box::new(it));
+                            }
+                            let merged_u = MergeIterator::create(iters);
+                            let upper_range =
+                                RangeLimiter::new(merged_u, start_key.clone(), end_key.clone());
+                            if let Some(lower) = lower_iter_range {
+                                let merged_iter = TwoMergeIterator::create(upper_range, lower)?;
+                                self.compact_generate_sst_from_iter(
+                                    merged_iter,
+                                    task.compact_to_bottom_level(),
+                                )?
+                            } else {
+                                self.compact_generate_sst_from_iter(
+                                    upper_range,
+                                    task.compact_to_bottom_level(),
+                                )?
+                            }
+                        }
+                    };
+
+                    Ok(result)
+                })
+                .collect()
+        };
+
+        // Run subcompaction on the same pool as compaction scheduler
+        let subcompaction_results: Result<Vec<Vec<Arc<SsTable>>>> =
+            self.compaction_pool.install(work);
+
+        // 合并所有子任务的结果
+        let all_results = subcompaction_results?;
+        let mut final_result = Vec::new();
+
+        for sub_result in all_results {
+            final_result.extend(sub_result);
+        }
+
+        // 按key范围排序输出SST
+        final_result.sort_by(|a: &Arc<SsTable>, b: &Arc<SsTable>| a.first_key().cmp(b.first_key()));
+
+        println!(
+            "Subcompaction completed: generated {} SSTs",
+            final_result.len()
+        );
+        Ok(Some(final_result))
     }
 
     pub fn force_full_compaction(&self) -> Result<()> {

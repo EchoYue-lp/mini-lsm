@@ -97,6 +97,7 @@ pub struct LsmStorageOptions {
     pub num_memtable_limit: usize,
     pub compaction_options: CompactionOptions,
     pub num_compaction_thread_limit: usize,
+    pub num_subcompactions: usize,
     pub enable_wal: bool,
     pub serializable: bool,
     pub compression_options: CompressionOptions,
@@ -113,6 +114,7 @@ impl LsmStorageOptions {
             serializable: false,
             compression_options: CompressionOptions::Snappy,
             num_compaction_thread_limit: 2,
+            num_subcompactions: 2,
         }
     }
 
@@ -126,6 +128,7 @@ impl LsmStorageOptions {
             serializable: false,
             compression_options: CompressionOptions::Snappy,
             num_compaction_thread_limit: 2,
+            num_subcompactions: 2,
         }
     }
 
@@ -139,6 +142,7 @@ impl LsmStorageOptions {
             serializable: false,
             compression_options: CompressionOptions::Snappy,
             num_compaction_thread_limit: 10,
+            num_subcompactions: 2,
         }
     }
 }
@@ -163,6 +167,7 @@ pub(crate) struct LsmStorageInner {
     pub(crate) compaction_filters: Arc<Mutex<Vec<CompactionFilter>>>,
     pub(crate) running_compaction: Mutex<HashSet<usize>>,
     pub(crate) active_compactions: Arc<AtomicUsize>,
+    pub(crate) compaction_pool: Arc<ThreadPool>,
 }
 
 /// A thin wrapper for `LsmStorageInner` and the user interface for MiniLSM.
@@ -250,26 +255,20 @@ impl MiniLsm {
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
     /// not exist.
     pub fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Arc<Self>> {
-        let compaction_thread_nums = &options.num_compaction_thread_limit;
-        let compaction_pool = Arc::new(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(*compaction_thread_nums)
-                .build()?,
-        );
-
         let inner = Arc::new(LsmStorageInner::open(path, options)?);
         let (tx1, rx) = crossbeam_channel::unbounded();
+        let compaction_pool_clone = inner.compaction_pool.clone();
         let compaction_scheduler =
-            inner.spawn_compaction_scheduler_thread(rx, compaction_pool.clone())?;
+            inner.spawn_compaction_scheduler_thread(rx, compaction_pool_clone.clone())?;
         let (tx2, rx) = crossbeam_channel::unbounded();
         let flush_thread = inner.spawn_flush_thread(rx)?;
         Ok(Arc::new(Self {
-            inner,
+            inner: inner.clone(),
             flush_notifier: tx2,
             flush_thread: Mutex::new(flush_thread),
             compaction_notifier: tx1,
             compaction_scheduler: Mutex::new(compaction_scheduler),
-            _compaction_pool: compaction_pool,
+            _compaction_pool: compaction_pool_clone,
         }))
     }
 
@@ -471,6 +470,12 @@ impl LsmStorageInner {
         }
         let active_compactions: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
 
+        let compaction_pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(options.num_compaction_thread_limit)
+                .build()?,
+        );
+
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
             state_lock: Mutex::new(()),
@@ -485,6 +490,7 @@ impl LsmStorageInner {
             compaction_filters: Arc::new(Mutex::new(Vec::new())),
             compression_options,
             active_compactions,
+            compaction_pool,
         };
         storage.sync_dir()?;
 

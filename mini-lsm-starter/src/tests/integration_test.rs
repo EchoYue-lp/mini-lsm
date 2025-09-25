@@ -162,9 +162,9 @@ fn test_complete_integration() {
     let storage = MiniLsm::open(&dir, options.clone()).unwrap();
 
     // 阶段1: 写入数据
-    for i in 0..100000 {
-        let key = format!("user_{:05}", i);
-        let value = format!("data_{:05}_{}", i, "integration_test");
+    for i in 0..1000000 {
+        let key = format!("user_{:06}", i);
+        let value = format!("data_{:06}_{}", i, "integration_test");
         storage.put(key.as_bytes(), value.as_bytes()).unwrap();
     }
     println!("完成阶段一：写入 100000 条记录");
@@ -177,17 +177,17 @@ fn test_complete_integration() {
     println!("完成阶段二：force_freeze_memtable");
 
     // 阶段3: 再次写入数据
-    for i in 100000..110000 {
-        let key = format!("user_{:05}", i);
-        let value = format!("data_{:05}_{}", i, "integration_test");
+    for i in 1000000..1110000 {
+        let key = format!("user_{:06}", i);
+        let value = format!("data_{:06}_{}", i, "integration_test");
         storage.put(key.as_bytes(), value.as_bytes()).unwrap();
     }
     println!("完成阶段三：再次写入数据");
 
     // 阶段4: 验证读取
-    for i in 0..10000 {
-        let key = format!("user_{:05}", i);
-        let expected = format!("data_{:05}_{}", i, "integration_test");
+    for i in 111111..333333 {
+        let key = format!("user_{:06}", i);
+        let expected = format!("data_{:06}_{}", i, "integration_test");
         assert_eq!(
             storage.get(key.as_bytes()).unwrap(),
             Some(Bytes::copy_from_slice(expected.as_bytes()))
@@ -196,26 +196,28 @@ fn test_complete_integration() {
     println!("完成阶段四：验证读取");
 
     // 阶段5: 更新数据
-    for i in 0..20000 {
-        let key = format!("user_{:05}", i);
-        let new_value = format!("updated_data_{:05}", i);
+    for i in 333333..444444 {
+        let key = format!("user_{:06}", i);
+        let new_value = format!("updated_data_{:06}", i);
         storage.put(key.as_bytes(), new_value.as_bytes()).unwrap();
     }
     println!("完成阶段五：更新数据");
 
     // 阶段6: 删除数据
-    for i in 30000..40000 {
-        let key = format!("user_{:05}", i);
-        storage.delete(key.as_bytes()).unwrap();
-        assert_eq!(storage.get(key.as_bytes()).unwrap(), None);
+    for i in 444444..555555 {
+        if i % 2 == 0 {
+            let key = format!("user_{:06}", i);
+            storage.delete(key.as_bytes()).unwrap();
+            assert_eq!(storage.get(key.as_bytes()).unwrap(), None);
+        }
     }
     println!("完成阶段六：删除数据");
 
     // 阶段7: 范围扫描
     let mut iter = storage
         .scan(
-            Bound::Included("user_50000".as_bytes()),
-            Bound::Included("user_59999".as_bytes()),
+            Bound::Included("user_600000".as_bytes()),
+            Bound::Included("user_699999".as_bytes()),
         )
         .unwrap();
 
@@ -224,7 +226,7 @@ fn test_complete_integration() {
         count += 1;
         iter.next().unwrap();
     }
-    assert_eq!(count, 10000);
+    assert_eq!(count, 100000);
     println!("完成阶段七：范围扫描");
 
     // 阶段8: 测试大数据
@@ -245,9 +247,9 @@ fn test_complete_integration() {
     println!("完成阶段九：测试特殊字符");
 
     // 阶段10: 测试更新后读取
-    for i in 15000..18000 {
-        let key = format!("user_{:05}", i);
-        let expected = format!("updated_data_{:05}", i);
+    for i in 333333..444444 {
+        let key = format!("user_{:06}", i);
+        let expected = format!("updated_data_{:06}", i);
         assert_eq!(
             storage.get(key.as_bytes()).unwrap(),
             Some(Bytes::copy_from_slice(expected.as_bytes()))
@@ -256,9 +258,11 @@ fn test_complete_integration() {
     println!("完成阶段十：测试更新后读取");
 
     // 阶段11: 测试删除后读取
-    for i in 35000..38000 {
-        let key = format!("user_{:05}", i);
-        assert_eq!(storage.get(key.as_bytes()).unwrap(), None);
+    for i in 444444..555555 {
+        if i % 2 == 0 {
+            let key = format!("user_{:06}", i);
+            assert_eq!(storage.get(key.as_bytes()).unwrap(), None);
+        }
     }
     println!("完成阶段十一：测试删除后读取");
 
@@ -273,8 +277,8 @@ fn test_complete_integration() {
         let storage = MiniLsm::open(&dir, options).unwrap();
 
         for i in 50000..70000 {
-            let key = format!("user_{:05}", i);
-            let expected = format!("data_{:05}_{}", i, "integration_test");
+            let key = format!("user_{:06}", i);
+            let expected = format!("data_{:06}_{}", i, "integration_test");
             assert_eq!(
                 storage.get(key.as_bytes()).unwrap(),
                 Some(Bytes::copy_from_slice(expected.as_bytes()))

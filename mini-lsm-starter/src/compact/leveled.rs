@@ -106,7 +106,6 @@ impl LeveledCompactionController {
     ///      - **不触发任何 compaction**。
     ///
     ///
-
     pub fn generate_compaction_task(
         &self,
         snapshot: &LsmStorageState,
