@@ -80,7 +80,7 @@ impl StorageIterator for MockIterator {
                 panic!("invalid access after next returns an error!");
             }
         }
-        KeySlice::for_testing_from_slice_no_ts(self.data[self.index].0.as_ref())
+        KeySlice::for_testing_from_slice_no_ts_no_ttl(self.data[self.index].0.as_ref())
     }
 
     fn value(&self) -> &[u8] {
@@ -207,7 +207,7 @@ pub fn generate_sst(
 ) -> SsTable {
     let mut builder = SsTableBuilder::new(128, CompressionOptions::Snappy);
     for (key, value) in data {
-        builder.add(KeySlice::for_testing_from_slice_no_ts(&key[..]), &value[..]);
+        builder.add(KeySlice::for_testing_from_slice_no_ts_no_ttl(&key[..]), &value[..]);
     }
     builder.build(id, block_cache, path.as_ref()).unwrap()
 }

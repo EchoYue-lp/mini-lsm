@@ -37,7 +37,10 @@ pub struct Transaction {
     pub(crate) read_ts: u64,
     pub(crate) inner: Arc<LsmStorageInner>,
     pub(crate) local_storage: Arc<SkipMap<Bytes, Bytes>>,
+    pub(crate) ttls: Arc<SkipMap<Bytes, u64>>,
     pub(crate) committed: Arc<AtomicBool>,
+    /// Keys explicitly marked for deletion in this txn
+    pub(crate) delete_keys: Mutex<HashSet<Bytes>>,
     /// Write set and read set
     pub(crate) key_hashes: Option<Mutex<(HashSet<u32>, HashSet<u32>)>>,
 }
@@ -54,13 +57,28 @@ impl Transaction {
             read_set.insert(farmhash::hash32(key));
         }
 
-        if let Some(entry) = self.local_storage.get(key) {
-            if entry.value().is_empty() {
+        let key_bytes = Bytes::copy_from_slice(key);
+
+        // Check local storage first
+        if let Some(entry) = self.local_storage.get(&key_bytes) {
+            // Check if this key was explicitly deleted in this transaction
+            if self.delete_keys.lock().contains(&key_bytes) {
                 return Ok(None);
-            } else {
-                return Ok(Some(entry.value().clone()));
             }
+
+            // Check TTL if present
+            if let Some(ttl_entry) = self.ttls.get(&key_bytes) {
+                let ttl = *ttl_entry.value();
+                if ttl > 0 && crate::key::current_timestamp() > ttl {
+                    return Ok(None);
+                }
+            }
+
+            // Return the value (could be empty for legitimate empty values)
+            return Ok(Some(entry.value().clone()));
         }
+
+        // Not found in local storage, check underlying storage
         self.inner.get_with_ts(key, self.read_ts)
     }
 
@@ -92,6 +110,31 @@ impl Transaction {
         }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        // Ensure it's not considered a delete
+        self.delete_keys.lock().remove(&Bytes::copy_from_slice(key));
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut key_hashes = key_hashes.lock();
+            let (write_hashes, _) = &mut *key_hashes;
+            write_hashes.insert(farmhash::hash32(key));
+        }
+    }
+
+    pub fn put_with_ttl(&self, key: &[u8], value: &[u8], ttl_secs: u64) {
+        // Record value in local storage and TTL in a side map
+        if self.committed.load(Ordering::SeqCst) {
+            panic!("cannot operate on committed txn!");
+        }
+        self.local_storage
+            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        let expire_at = if ttl_secs == 0 {
+            0
+        } else {
+            crate::key::current_timestamp().saturating_add(ttl_secs)
+        };
+        self.ttls
+            .insert(Bytes::copy_from_slice(key), expire_at);
+        // Ensure it's not considered a delete
+        self.delete_keys.lock().remove(&Bytes::copy_from_slice(key));
         if let Some(key_hashes) = &self.key_hashes {
             let mut key_hashes = key_hashes.lock();
             let (write_hashes, _) = &mut *key_hashes;
@@ -105,6 +148,9 @@ impl Transaction {
         }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::new());
+        // Record explicit delete and remove TTL metadata if present
+        self.delete_keys.lock().insert(Bytes::copy_from_slice(key));
+        self.ttls.remove(key);
         if let Some(key_hashes) = &self.key_hashes {
             let mut key_hashes = key_hashes.lock();
             let (write_hashes, _) = &mut *key_hashes;
@@ -145,10 +191,25 @@ impl Transaction {
             .local_storage
             .iter()
             .map(|entry| {
-                if entry.value().is_empty() {
-                    WriteBatchRecord::Del(entry.key().clone())
+                if self.delete_keys.lock().contains(entry.key()) {
+                    let rec = WriteBatchRecord::Del(entry.key().clone());
+                    rec
                 } else {
-                    WriteBatchRecord::Put(entry.key().clone(), entry.value().clone())
+                    // If a TTL is recorded for this key, use PutWithTtl
+                    if let Some(ttl_entry) = self.ttls.get(entry.key()) {
+                        let rec = WriteBatchRecord::PutWithTtl(
+                            entry.key().clone(),
+                            entry.value().clone(),
+                            *ttl_entry.value(),
+                        );
+                        rec
+                    } else {
+                        let rec = WriteBatchRecord::Put(
+                            entry.key().clone(),
+                            entry.value().clone(),
+                        );
+                        rec
+                    }
                 }
             })
             .collect::<Vec<_>>();

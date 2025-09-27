@@ -28,7 +28,7 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::range_limiter::RangeLimiter;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
-use crate::key::{KeyBytes, KeySlice};
+use crate::key::{KeyBytes, KeySlice, TTL_DEFAULT, Type, current_timestamp};
 use crate::lsm_storage::{CompactionFilter, LsmStorageInner, LsmStorageState};
 use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
@@ -612,7 +612,6 @@ impl LsmStorageInner {
 
     // trivial move 的主逻辑：不做文件读写，只更新元数据，并按与普通合并一致的流程持久化。
     fn trivial_move(&self, task: LeveledCompactionTask) -> Result<()> {
-        self.dump_structure();
 
         // 基本校验（锁外）
         if task.upper_level_sst_ids.is_empty() {
@@ -682,7 +681,6 @@ impl LsmStorageInner {
     // 2、执行 compact
     // 3、根据 compact 生成的新的 SSTs，对原有的 ssts 进行删除
     fn trigger_merge_compaction(&self, task: CompactionTask) -> Result<()> {
-        self.dump_structure();
         println!("running compaction task: {:?}", task);
 
         // Compact the task and get the new SSTs
@@ -874,6 +872,7 @@ impl LsmStorageInner {
         let watermark = self.mvcc().watermark();
         let mut last_key = Vec::<u8>::new();
         let mut first_key_below_watermark = false;
+        let current_time = current_timestamp();
         let compaction_filters = self.compaction_filters.lock().clone();
         'outer: while iter.is_valid() {
             if builder.is_none() {
@@ -892,7 +891,21 @@ impl LsmStorageInner {
             if compact_to_bottom_level
                 && !same_as_last_key
                 && iter.key().ts() <= watermark
-                && iter.value().is_empty()
+                && iter.key().key_type() == Type::DELETE
+            {
+                last_key.clear();
+                last_key.extend(iter.key().key_ref());
+                iter.next()?;
+                first_key_below_watermark = false;
+                continue;
+            }
+
+            // 删除过期数据
+            if compact_to_bottom_level
+                && !same_as_last_key
+                && iter.key().ts() <= watermark
+                && iter.key().ttl() != TTL_DEFAULT
+                && iter.key().is_expired(current_time)
             {
                 last_key.clear();
                 last_key.extend(iter.key().key_ref());

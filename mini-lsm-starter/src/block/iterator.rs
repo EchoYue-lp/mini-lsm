@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::key::{KeySlice, KeyVec};
+use crate::key::{KeySlice, KeyVec, Type};
 use bytes::Buf;
 use std::sync::Arc;
 
@@ -40,7 +40,9 @@ impl Block {
         let key = &buf[..key_len];
         buf.advance(key_len);
         let ts = buf.get_u64();
-        KeyVec::from_vec_with_ts(key.to_vec(), ts)
+        let key_type = Type::try_from(buf.get_u8()).unwrap_or(Type::PUT);
+        let ttl = buf.get_u64();
+        KeyVec::from_bytes_with_all(key.to_vec(), ts, key_type, ttl)
     }
 }
 
@@ -142,11 +144,15 @@ impl BlockIterator {
         self.key.append(key);
         data.advance(key_len);
         let ts = data.get_u64();
+        let key_type = Type::try_from(data.get_u8()).unwrap_or(Type::PUT);
+        let ttl = data.get_u64();
+
         self.key.set_ts(ts);
+        self.key.set_type(key_type);
+        self.key.set_ttl(ttl);
 
         let value_len = data.get_u16() as usize;
-        let value_offset_begin =
-            offset + SIZEOF_U16 + SIZEOF_U64 + SIZEOF_U16 + key_len + SIZEOF_U16;
+        let value_offset_begin = offset + SIZEOF_U16 + SIZEOF_U16 + key_len + SIZEOF_U64 + 1 /* type */ + SIZEOF_U64 + SIZEOF_U16;
         let value_offset_end = value_offset_begin + value_len;
         self.value_range = (value_offset_begin, value_offset_end);
         data.advance(value_len);

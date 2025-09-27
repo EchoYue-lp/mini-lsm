@@ -345,6 +345,7 @@ fn main() -> Result<()> {
             target_sst_size: 2 << 20, // 2MB
             num_memtable_limit: 3,
             num_subcompactions: 4,
+            enable_ttl: false,
             compaction_options: match args.compaction {
                 CompactionStrategy::None => CompactionOptions::NoCompaction,
                 CompactionStrategy::Simple => {

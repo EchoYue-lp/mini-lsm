@@ -44,3 +44,7 @@ harness = false
 [[bench]]
 name = "compaction_bench"
 harness = false
+
+[[bench]]
+name = "ttl_delete_bench_simple"
+harness = false

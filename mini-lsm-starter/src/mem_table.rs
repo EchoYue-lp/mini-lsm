@@ -234,14 +234,25 @@ impl MemTable {
 /// Create a bound of `Bytes` from a bound of `KeySlice`.
 pub(crate) fn map_key_bound(bound: Bound<KeySlice>) -> Bound<KeyBytes> {
     match bound {
-        Bound::Included(x) => Bound::Included(KeyBytes::from_bytes_with_ts(
-            Bytes::copy_from_slice(x.key_ref()),
-            x.ts(),
-        )),
-        Bound::Excluded(x) => Bound::Excluded(KeyBytes::from_bytes_with_ts(
-            Bytes::copy_from_slice(x.key_ref()),
-            x.ts(),
-        )),
+        Bound::Included(x) => {
+            let key = KeyBytes::from_bytes_with_all(
+                Bytes::copy_from_slice(x.key_ref()),
+                x.ts(),
+                x.key_type(),
+                x.ttl(),
+            );
+            Bound::Included(key)
+        }
+        Bound::Excluded(x) => {
+            let key = KeyBytes::from_bytes_with_all(
+                Bytes::copy_from_slice(x.key_ref()),
+                x.ts(),
+                x.key_type(),
+                x.ttl(),
+            );
+
+            Bound::Excluded(key)
+        }
         Bound::Unbounded => Bound::Unbounded,
     }
 }

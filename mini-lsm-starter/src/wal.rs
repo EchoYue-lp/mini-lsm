@@ -58,11 +58,15 @@ impl Wal {
                 batch_buf.advance(key_len);
                 let ts = batch_buf.get_u64();
                 hasher.write(&ts.to_be_bytes());
+                let key_type_byte = batch_buf.get_u8();
+                hasher.write(&[key_type_byte]);
+                let ttl = batch_buf.get_u64();
+                hasher.write(&ttl.to_be_bytes());
                 let value_len = batch_buf.get_u16() as usize;
                 hasher.write(&(value_len as u16).to_be_bytes());
                 let value = Bytes::copy_from_slice(&batch_buf[..value_len]);
                 hasher.write(&value);
-                kv_pairs.push((key, ts, value));
+                kv_pairs.push((key, ts, key_type_byte, ttl, value));
                 batch_buf.advance(value_len);
             }
             rbuf.advance(batch_size);
@@ -72,8 +76,11 @@ impl Wal {
             if single_checksum != expected_checksum {
                 bail!("checksum mismatch");
             }
-            for (key, ts, value) in kv_pairs {
-                skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), value);
+            for (key, ts, key_type_byte, ttl, value) in kv_pairs {
+                let key_type =
+                    crate::key::Type::try_from(key_type_byte).unwrap_or(crate::key::Type::PUT);
+                let key_bytes = KeyBytes::from_bytes_with_all(key, ts, key_type, ttl);
+                skiplist.insert(key_bytes, value);
             }
         }
         Ok(Self {
@@ -88,6 +95,8 @@ impl Wal {
             buf.put_u16(key.key_len() as u16);
             buf.put_slice(key.key_ref());
             buf.put_u64(key.ts());
+            buf.put_u8(u8::from(key.key_type()));
+            buf.put_u64(key.ttl());
             buf.put_u16(value.len() as u16);
             buf.put_slice(value);
         }

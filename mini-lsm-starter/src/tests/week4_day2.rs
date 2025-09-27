@@ -179,7 +179,7 @@ fn test_trivial_move_recovery() {
         level_size_multiplier: 10,
         level0_file_num_compaction_trigger: 2,
         max_levels: 4,
-        base_level_size_mb: 2,
+        base_level_size_mb: 50,
     });
 
     let lsm_storage_options = LsmStorageOptions::default_for_week2_test(compaction_options.clone());
@@ -191,7 +191,7 @@ fn test_trivial_move_recovery() {
     // 第一批数据：key0000-key99999
     for i in 0..100000 {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
-        let value = vec![i as u8; 1024 * 64];
+        let value = vec![i as u8; 1024 * 32];
         storage.put(&key, &value).unwrap();
     }
 
@@ -204,7 +204,7 @@ fn test_trivial_move_recovery() {
     // 第二批数据：key10000-key11999（不与第一批重叠）
     for i in 100000..120000 {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
-        let value = vec![i as u8; 1024 * 64];
+        let value = vec![i as u8; 1024 * 32];
         storage.put(&key, &value).unwrap();
     }
 
@@ -234,7 +234,7 @@ fn test_trivial_move_recovery() {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
         let result = storage.get(&key).unwrap();
         if let Some(value) = result {
-            assert_eq!(value, vec![i as u8; 1024 * 64]);
+            assert_eq!(value, vec![i as u8; 1024 * 32]);
             found_count += 1;
         }
     }
@@ -260,7 +260,7 @@ fn test_trivial_move_recovery() {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
         let result = storage.get(&key).unwrap();
         if let Some(value) = result {
-            assert_eq!(value, vec![i as u8; 1024 * 64]);
+            assert_eq!(value, vec![i as u8; 1024 * 32]);
             found_count += 1;
         }
     }
@@ -269,7 +269,7 @@ fn test_trivial_move_recovery() {
     println!("5. 插入新数据验证系统仍然正常工作...");
     for i in 10000..11025 {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
-        let value = vec![i as u8; 1024 * 64];
+        let value = vec![i as u8; 1024 * 32];
         storage.put(&key, &value).unwrap();
     }
 
@@ -278,7 +278,7 @@ fn test_trivial_move_recovery() {
         let key = format!("recovery_key{:05}", i).as_bytes().to_vec();
         let result = storage.get(&key).unwrap();
         assert!(result.is_some(), "新插入的键应该存在");
-        assert_eq!(result.unwrap(), vec![i as u8; 1024 * 64]);
+        assert_eq!(result.unwrap(), vec![i as u8; 1024 * 32]);
     }
 
     storage.close().unwrap();

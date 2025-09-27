@@ -160,7 +160,7 @@ fn generate_concat_sst(
     for idx in start_key..end_key {
         let key = format!("{:05}", idx);
         builder.add(
-            KeySlice::for_testing_from_slice_no_ts(key.as_bytes()),
+            KeySlice::for_testing_from_slice_no_ts_no_ttl(key.as_bytes()),
             b"test",
         );
     }
@@ -183,7 +183,7 @@ fn test_task2_concat_iterator() {
     for key in 0..120 {
         let iter = SstConcatIterator::create_and_seek_to_key(
             sstables.clone(),
-            KeySlice::for_testing_from_slice_no_ts(format!("{:05}", key).as_bytes()),
+            KeySlice::for_testing_from_slice_no_ts_no_ttl(format!("{:05}", key).as_bytes()),
         )
         .unwrap();
         if key < 10 {

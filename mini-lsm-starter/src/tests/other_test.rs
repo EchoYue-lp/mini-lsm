@@ -1,6 +1,6 @@
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[test]
 fn test_rotate_left_and_right() {
@@ -35,6 +35,51 @@ fn test_thread_pool() {
     // db 被 drop 时，其内部的 rayon::ThreadPool 也会被 drop，
     // 这会阻塞并等待池中所有任务完成。
     println!("准备关闭基于 Rayon 的数据库...");
+}
+
+#[test]
+fn test_get_millis() {
+    // 最佳实践
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    println!("当前毫秒数：{}", millis);
+
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    println!("当前毫秒数：{}", millis);
+
+    let i = generate_unique_timestamp();
+    println!("当前毫秒数：{}", i);
+}
+
+pub fn generate_unique_timestamp() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static LAST_TIMESTAMP: AtomicU64 = AtomicU64::new(0);
+
+    let mut timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+
+    // 确保严格递增
+    loop {
+        let last = LAST_TIMESTAMP.load(Ordering::Acquire);
+        if timestamp <= last {
+            timestamp = last + 1;
+        }
+
+        if LAST_TIMESTAMP
+            .compare_exchange_weak(last, timestamp, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+        {
+            break timestamp;
+        }
+    }
 }
 
 struct Database {

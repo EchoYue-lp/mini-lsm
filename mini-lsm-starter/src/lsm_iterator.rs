@@ -15,6 +15,7 @@
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::table::SsTableIterator;
+use crate::key::{KeySlice, Type};
 use crate::{
     iterators::{StorageIterator, merge_iterator::MergeIterator},
     mem_table::MemTableIterator,
@@ -74,7 +75,8 @@ impl LsmIterator {
             if self.inner.key().key_ref() != self.prev_key {
                 continue;
             }
-            if !self.inner.value().is_empty() {
+            let current_time = crate::key::current_timestamp();
+            if self.inner.key().key_type() != Type::DELETE && !self.inner.key().is_expired(current_time) {
                 break;
             }
         }
@@ -119,6 +121,13 @@ impl StorageIterator for LsmIterator {
 
     fn num_active_iterators(&self) -> usize {
         self.inner.num_active_iterators()
+    }
+}
+
+impl LsmIterator {
+    /// Get the full key including timestamp and TTL information
+    pub fn full_key(&self) -> KeySlice<'_> {
+        self.inner.key()
     }
 }
 

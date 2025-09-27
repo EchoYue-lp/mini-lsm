@@ -53,8 +53,8 @@ impl BlockBuilder {
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
         assert!(!key.is_empty(), "key must not be empty");
 
-        // 现在已有的长度+Key长度+时间戳+Value长度+3倍的SIZEOF_U16
-        if self.estimated_size() + key.key_len() + value.len() + SIZEOF_U16 * 3 /* key_len, value_len and offset */ > self.block_size
+        // 现在已有的长度+Key长度+时间戳+Type+TTL+Value长度+3倍的SIZEOF_U16
+        if self.estimated_size() + key.key_len() + value.len() + SIZEOF_U16 * 3 /* key_len, value_len and offset */ + 8 /* ts */ + 1 /* type */ + 8 /* ttl */ > self.block_size
             && !self.is_empty()
         {
             return false;
@@ -70,6 +70,8 @@ impl BlockBuilder {
         self.data.put_u16((key.key_len() - overlap) as u16);
         self.data.put_slice(&key.key_ref()[overlap..]);
         self.data.put_u64(key.ts());
+        self.data.put_u8(u8::from(key.key_type()));
+        self.data.put_u64(key.ttl());
 
         self.data.put_u16(value.len() as u16);
         self.data.put_slice(value);

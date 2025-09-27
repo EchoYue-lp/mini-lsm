@@ -23,7 +23,7 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key;
-use crate::key::{KeySlice, TS_RANGE_BEGIN};
+use crate::key::{KeySlice, TS_RANGE_BEGIN, Type, current_timestamp};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{MemTable, map_bound, map_key_bound_plus_ts};
@@ -63,6 +63,7 @@ pub struct LsmStorageState {
 
 pub enum WriteBatchRecord<T: AsRef<[u8]>> {
     Put(T, T),
+    PutWithTtl(T, T, u64),
     Del(T),
 }
 
@@ -99,6 +100,7 @@ pub struct LsmStorageOptions {
     pub num_compaction_thread_limit: usize,
     pub num_subcompactions: usize,
     pub enable_wal: bool,
+    pub enable_ttl: bool,
     pub serializable: bool,
     pub compression_options: CompressionOptions,
 }
@@ -115,6 +117,7 @@ impl LsmStorageOptions {
             compression_options: CompressionOptions::Snappy,
             num_compaction_thread_limit: 2,
             num_subcompactions: 2,
+            enable_ttl: false,
         }
     }
 
@@ -129,6 +132,7 @@ impl LsmStorageOptions {
             compression_options: CompressionOptions::Snappy,
             num_compaction_thread_limit: 2,
             num_subcompactions: 2,
+            enable_ttl: false,
         }
     }
 
@@ -143,6 +147,7 @@ impl LsmStorageOptions {
             compression_options: CompressionOptions::Snappy,
             num_compaction_thread_limit: 10,
             num_subcompactions: 2,
+            enable_ttl: false,
         }
     }
 }
@@ -286,6 +291,10 @@ impl MiniLsm {
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.inner.get(key)
+    }
+
+    pub fn put_with_ttl(self: &Arc<Self>, key: &[u8], value: &[u8], ttl: u64) -> Result<()> {
+        self.inner.put_with_ttl(key, value, ttl)
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
@@ -591,7 +600,15 @@ impl LsmStorageInner {
             read_ts,
         )?;
 
-        if iter.is_valid() && iter.key() == key && !iter.value().is_empty() {
+        if iter.is_valid() && iter.key() == key {
+            let current_key = iter.full_key();
+            if current_key.key_type() == Type::DELETE {
+                return Ok(None);
+            }
+            let current_time = current_timestamp();
+            if current_key.is_expired(current_time) {
+                return Ok(None);
+            }
             return Ok(Some(Bytes::copy_from_slice(iter.value())));
         }
 
@@ -610,13 +627,18 @@ impl LsmStorageInner {
                     let key = key.as_ref();
                     let value = value.as_ref();
                     assert!(!key.is_empty(), "key cannot be empty");
-                    assert!(!value.is_empty(), "value cannot be empty");
                     batch_datas.push((KeySlice::from_slice(key, ts), value));
+                }
+                WriteBatchRecord::PutWithTtl(key, value, ttl) => {
+                    let key = key.as_ref();
+                    let value = value.as_ref();
+                    assert!(!key.is_empty(), "key cannot be empty");
+                    batch_datas.push((KeySlice::from_slice_with_ttl(key, ts, *ttl), value));
                 }
                 WriteBatchRecord::Del(key) => {
                     let key = key.as_ref();
                     assert!(!key.is_empty(), "key cannot be null");
-                    batch_datas.push((KeySlice::from_slice(key, ts), b""));
+                    batch_datas.push((KeySlice::from_slice_with_type(key, ts, Type::DELETE), b""));
                 }
             }
         }
@@ -644,6 +666,9 @@ impl LsmStorageInner {
                 WriteBatchRecord::Del(key) => {
                     txn.delete(key.as_ref());
                 }
+                WriteBatchRecord::PutWithTtl(key, value, ttl) => {
+                    txn.put_with_ttl(key.as_ref(), value.as_ref(), *ttl);
+                }
             }
         }
         txn.commit()?;
@@ -653,6 +678,12 @@ impl LsmStorageInner {
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(self: &Arc<Self>, key: &[u8], value: &[u8]) -> Result<()> {
         self.write_batch(&[WriteBatchRecord::Put(key, value)])?;
+        Ok(())
+    }
+
+    /// Put a key-value pair with TTL into the storage.
+    pub fn put_with_ttl(self: &Arc<Self>, key: &[u8], value: &[u8], ttl: u64) -> Result<()> {
+        self.write_batch(&[WriteBatchRecord::PutWithTtl(key, value, ttl)])?;
         Ok(())
     }
 
