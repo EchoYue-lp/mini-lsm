@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::error::{BlockError, LsmError, LsmResult};
 use crate::key::{KeySlice, KeyVec};
 use bytes::BufMut;
 
@@ -90,14 +91,14 @@ impl BlockBuilder {
     }
 
     /// Finalize the block.
-    pub fn build(self) -> Block {
+    pub fn build(self) -> LsmResult<Block> {
         if self.is_empty() {
-            panic!("block should not be empty");
+            return Err(LsmError::Block(BlockError::Empty));
         }
-        Block {
+        Ok(Block {
             data: self.data,
             offsets: self.offsets,
-        }
+        })
     }
 }
 

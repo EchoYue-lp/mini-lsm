@@ -76,7 +76,7 @@ fn generate_block() -> Block {
         let value = value_of(idx);
         assert!(builder.add(key.as_key_slice(), &value[..]));
     }
-    builder.build()
+    builder.build().unwrap()
 }
 
 #[test]

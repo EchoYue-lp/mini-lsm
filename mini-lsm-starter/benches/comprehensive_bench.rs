@@ -1,4 +1,4 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main, BatchSize};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use mini_lsm_starter::compact::{CompactionOptions, LeveledCompactionOptions};
 use mini_lsm_starter::iterators::StorageIterator;
 use mini_lsm_starter::lsm_storage::{LsmStorageOptions, MiniLsm};
@@ -16,6 +16,110 @@ fn generate_test_data(count: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
+/// 创建标准LSM配置
+fn create_lsm_options() -> LsmStorageOptions {
+    LsmStorageOptions::default_for_week2_test(CompactionOptions::Leveled(
+        LeveledCompactionOptions {
+            level_size_multiplier: 10,
+            level0_file_num_compaction_trigger: 4,
+            max_levels: 7,
+            base_level_size_mb: 256,
+        },
+    ))
+}
+
+/// Benchmark: 基础LSM写入性能
+fn bench_lsm_write(c: &mut Criterion) {
+    let mut group = c.benchmark_group("lsm_write");
+
+    // 测试不同大小的写入
+    for size in [100, 1000, 10000].iter() {
+        group.bench_with_input(
+            criterion::BenchmarkId::from_parameter(size),
+            size,
+            |b, &size| {
+                b.iter_batched(
+                    || {
+                        let dir = tempdir().unwrap();
+                        let dir_path = dir.path().to_path_buf();
+                        let storage = MiniLsm::open(&dir_path, create_lsm_options()).unwrap();
+                        (storage, dir)
+                    },
+                    |(storage, _dir)| {
+                        for i in 0..size {
+                            let key = format!("key_{:08}", i);
+                            let value = format!("value_{:08}", i);
+                            storage.put(key.as_bytes(), value.as_bytes()).unwrap();
+                        }
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Benchmark: 基础LSM读取性能
+fn bench_lsm_read(c: &mut Criterion) {
+    let dir = tempdir().unwrap();
+    let storage = MiniLsm::open(&dir, create_lsm_options()).unwrap();
+
+    // 预先写入数据
+    for i in 0..10000 {
+        let key = format!("key_{:08}", i);
+        let value = format!("value_{:08}", i);
+        storage.put(key.as_bytes(), value.as_bytes()).unwrap();
+    }
+
+    let mut group = c.benchmark_group("lsm_read");
+
+    // 测试随机读取
+    group.bench_function("random_read", |b| {
+        b.iter(|| {
+            let key = format!("key_{:08}", black_box(5000));
+            storage.get(key.as_bytes()).unwrap();
+        })
+    });
+
+    group.finish();
+}
+
+/// Benchmark: 基础LSM扫描性能
+fn bench_lsm_scan(c: &mut Criterion) {
+    let dir = tempdir().unwrap();
+    let storage = MiniLsm::open(&dir, create_lsm_options()).unwrap();
+
+    // 预先写入数据
+    for i in 0..10000 {
+        let key = format!("key_{:08}", i);
+        let value = format!("value_{:08}", i);
+        storage.put(key.as_bytes(), value.as_bytes()).unwrap();
+    }
+
+    let mut group = c.benchmark_group("lsm_scan");
+
+    // 测试范围扫描
+    group.bench_function("range_scan_100", |b| {
+        b.iter(|| {
+            let mut iter = storage
+                .scan(
+                    Bound::Included("key_00001000".as_bytes()),
+                    Bound::Included("key_00001099".as_bytes()),
+                )
+                .unwrap();
+            let mut count = 0;
+            while iter.is_valid() {
+                count += 1;
+                iter.next().unwrap();
+            }
+            assert_eq!(count, 100);
+        })
+    });
+
+    group.finish();
+}
+
 /// Benchmark: TTL vs 普通写入性能对比
 fn bench_ttl_vs_normal_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("ttl_vs_normal_write");
@@ -31,18 +135,11 @@ fn bench_ttl_vs_normal_write(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let dir = tempdir().unwrap();
-                        let options = LsmStorageOptions::default_for_week2_test(
-                            CompactionOptions::Leveled(LeveledCompactionOptions {
-                                level_size_multiplier: 10,
-                                level0_file_num_compaction_trigger: 4,
-                                max_levels: 7,
-                                base_level_size_mb: 256,
-                            }),
-                        );
-                        let storage = MiniLsm::open(&dir, options).unwrap();
-                        (storage, test_data.clone())
+                        let dir_path = dir.path().to_path_buf();
+                        let storage = MiniLsm::open(&dir_path, create_lsm_options()).unwrap();
+                        (storage, test_data.clone(), dir)
                     },
-                    |(storage, data)| {
+                    |(storage, data, _dir)| {
                         for (key, value) in data {
                             storage.put(&key, &value).unwrap();
                         }
@@ -60,18 +157,11 @@ fn bench_ttl_vs_normal_write(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let dir = tempdir().unwrap();
-                        let options = LsmStorageOptions::default_for_week2_test(
-                            CompactionOptions::Leveled(LeveledCompactionOptions {
-                                level_size_multiplier: 10,
-                                level0_file_num_compaction_trigger: 4,
-                                max_levels: 7,
-                                base_level_size_mb: 256,
-                            }),
-                        );
-                        let storage = MiniLsm::open(&dir, options).unwrap();
-                        (storage, test_data.clone())
+                        let dir_path = dir.path().to_path_buf();
+                        let storage = MiniLsm::open(&dir_path, create_lsm_options()).unwrap();
+                        (storage, test_data.clone(), dir)
                     },
-                    |(storage, data)| {
+                    |(storage, data, _dir)| {
                         for (key, value) in data {
                             storage.put_with_ttl(&key, &value, 3600).unwrap(); // 1小时TTL
                         }
@@ -97,15 +187,8 @@ fn bench_delete_performance(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let dir = tempdir().unwrap();
-                        let options = LsmStorageOptions::default_for_week2_test(
-                            CompactionOptions::Leveled(LeveledCompactionOptions {
-                                level_size_multiplier: 10,
-                                level0_file_num_compaction_trigger: 4,
-                                max_levels: 7,
-                                base_level_size_mb: 256,
-                            }),
-                        );
-                        let storage = MiniLsm::open(&dir, options).unwrap();
+                        let dir_path = dir.path().to_path_buf();
+                        let storage = MiniLsm::open(&dir_path, create_lsm_options()).unwrap();
 
                         // 预先写入数据
                         for i in 0..size {
@@ -113,9 +196,9 @@ fn bench_delete_performance(c: &mut Criterion) {
                             let value = format!("value_{:08}_{}", i, "x".repeat(50));
                             storage.put(key.as_bytes(), value.as_bytes()).unwrap();
                         }
-                        storage
+                        (storage, dir)
                     },
-                    |storage| {
+                    |(storage, _dir)| {
                         // 删除所有数据
                         for i in 0..size {
                             let key = format!("key_{:08}", i);
@@ -137,15 +220,7 @@ fn bench_ttl_read_performance(c: &mut Criterion) {
 
     // 创建存储并预加载数据
     let dir = tempdir().unwrap();
-    let options = LsmStorageOptions::default_for_week2_test(
-        CompactionOptions::Leveled(LeveledCompactionOptions {
-            level_size_multiplier: 10,
-            level0_file_num_compaction_trigger: 4,
-            max_levels: 7,
-            base_level_size_mb: 256,
-        }),
-    );
-    let storage = MiniLsm::open(&dir, options).unwrap();
+    let storage = MiniLsm::open(&dir, create_lsm_options()).unwrap();
 
     // 写入混合数据
     for i in 0..5000 {
@@ -157,7 +232,9 @@ fn bench_ttl_read_performance(c: &mut Criterion) {
             storage.put(key.as_bytes(), value.as_bytes()).unwrap();
         } else {
             // 50% TTL数据
-            storage.put_with_ttl(key.as_bytes(), value.as_bytes(), 3600).unwrap();
+            storage
+                .put_with_ttl(key.as_bytes(), value.as_bytes(), 3600)
+                .unwrap();
         }
     }
 
@@ -184,15 +261,7 @@ fn bench_ttl_scan_performance(c: &mut Criterion) {
 
     // 创建存储并预加载数据
     let dir = tempdir().unwrap();
-    let options = LsmStorageOptions::default_for_week2_test(
-        CompactionOptions::Leveled(LeveledCompactionOptions {
-            level_size_multiplier: 10,
-            level0_file_num_compaction_trigger: 4,
-            max_levels: 7,
-            base_level_size_mb: 256,
-        }),
-    );
-    let storage = MiniLsm::open(&dir, options).unwrap();
+    let storage = MiniLsm::open(&dir, create_lsm_options()).unwrap();
 
     // 写入混合数据：普通数据 + TTL数据
     for i in 0..10000 {
@@ -202,7 +271,9 @@ fn bench_ttl_scan_performance(c: &mut Criterion) {
         if i % 2 == 0 {
             storage.put(key.as_bytes(), value.as_bytes()).unwrap();
         } else {
-            storage.put_with_ttl(key.as_bytes(), value.as_bytes(), 3600).unwrap(); // 1小时TTL
+            storage
+                .put_with_ttl(key.as_bytes(), value.as_bytes(), 3600)
+                .unwrap(); // 1小时TTL
         }
     }
 
@@ -229,43 +300,29 @@ fn bench_ttl_scan_performance(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark: TTL过期处理性能
-fn bench_ttl_expiration_performance(c: &mut Criterion) {
-    let mut group = c.benchmark_group("ttl_expiration_performance");
+/// Benchmark: Flush性能测试
+fn bench_flush_performance(c: &mut Criterion) {
+    let mut group = c.benchmark_group("flush_performance");
 
-    group.bench_function("expired_data_access", |b| {
+    group.bench_function("force_flush_memtable", |b| {
         b.iter_batched(
             || {
                 let dir = tempdir().unwrap();
-                let options = LsmStorageOptions::default_for_week2_test(
-                    CompactionOptions::Leveled(LeveledCompactionOptions {
-                        level_size_multiplier: 10,
-                        level0_file_num_compaction_trigger: 4,
-                        max_levels: 7,
-                        base_level_size_mb: 256,
-                    }),
-                );
-                let storage = MiniLsm::open(&dir, options).unwrap();
+                let dir_path = dir.path().to_path_buf();
+                let storage = MiniLsm::open(&dir_path, create_lsm_options()).unwrap();
 
-                // 写入已过期的数据（TTL = 1秒，然后等待2秒）
-                for i in 0..500 {
+                // 写入数据到内存表
+                for i in 0..5000 {
                     let key = format!("key_{:08}", i);
                     let value = format!("value_{:08}_{}", i, "x".repeat(50));
-                    storage.put_with_ttl(key.as_bytes(), value.as_bytes(), 1).unwrap();
+                    storage.put(key.as_bytes(), value.as_bytes()).unwrap();
                 }
-
-                // 等待数据过期
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                storage
+                // 返回存储实例和目录句柄，保持目录存活
+                (storage, dir)
             },
-            |storage| {
-                // 尝试读取过期数据
-                for i in 0..500 {
-                    let key = format!("key_{:08}", i);
-                    let result = storage.get(key.as_bytes()).unwrap();
-                    // 过期数据应该返回None
-                    assert!(result.is_none());
-                }
+            |(storage, _dir)| {
+                // 测试强制flush操作性能，_dir确保目录在此期间不被清理
+                storage.force_flush().unwrap();
             },
             BatchSize::SmallInput,
         );
@@ -282,18 +339,11 @@ fn bench_mixed_operations_performance(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let dir = tempdir().unwrap();
-                let options = LsmStorageOptions::default_for_week2_test(
-                    CompactionOptions::Leveled(LeveledCompactionOptions {
-                        level_size_multiplier: 10,
-                        level0_file_num_compaction_trigger: 4,
-                        max_levels: 7,
-                        base_level_size_mb: 256,
-                    }),
-                );
-                let storage = MiniLsm::open(&dir, options).unwrap();
-                storage
+                let dir_path = dir.path().to_path_buf();
+                let storage = MiniLsm::open(&dir_path, create_lsm_options()).unwrap();
+                (storage, dir)
             },
-            |storage| {
+            |(storage, _dir)| {
                 for i in 0..1000 {
                     let key = format!("key_{:08}", i);
                     let value = format!("value_{:08}_{}", i, "x".repeat(50));
@@ -305,7 +355,9 @@ fn bench_mixed_operations_performance(c: &mut Criterion) {
                         }
                         1 => {
                             // 25% TTL写入
-                            storage.put_with_ttl(key.as_bytes(), value.as_bytes(), 3600).unwrap();
+                            storage
+                                .put_with_ttl(key.as_bytes(), value.as_bytes(), 3600)
+                                .unwrap();
                         }
                         2 => {
                             // 25% 读取操作
@@ -334,11 +386,14 @@ fn bench_mixed_operations_performance(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_lsm_write,
+    bench_lsm_read,
+    bench_lsm_scan,
     bench_ttl_vs_normal_write,
     bench_delete_performance,
     bench_ttl_read_performance,
     bench_ttl_scan_performance,
-    bench_ttl_expiration_performance,
+    bench_flush_performance,
     bench_mixed_operations_performance
 );
 criterion_main!(benches);

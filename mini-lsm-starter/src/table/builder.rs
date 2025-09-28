@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use super::{BlockMeta, FileObject, SsTable};
 use crate::compression::CompressionOptions;
+use crate::error::{LsmError, LsmResult, SsTableError};
 use crate::key::KeyVec;
 use crate::table::bloom::Bloom;
 use crate::{block::BlockBuilder, key::KeySlice, lsm_storage::BlockCache};
@@ -56,7 +57,7 @@ impl SsTableBuilder {
     ///
     /// Note: You should split a new block when the current block is full.(`std::mem::replace` may
     /// be helpful here)
-    pub fn add(&mut self, key: KeySlice, value: &[u8]) {
+    pub fn add(&mut self, key: KeySlice, value: &[u8]) -> LsmResult<()> {
         if self.first_key.is_empty() {
             self.first_key.set_from_slice(key);
         }
@@ -68,16 +69,21 @@ impl SsTableBuilder {
         self.key_hashes.push(farmhash::fingerprint32(key.key_ref()));
         if self.builder.add(key, value) {
             self.last_key.set_from_slice(key);
-            return;
+            return Ok(());
         }
 
         // 走到这里，说明上一个 block 满了
-        self.finish_block();
+        self.finish_block()?;
         // add the key-value pair to the next block
-        assert!(self.builder.add(key, value));
+        if !self.builder.add(key, value) {
+            return Err(LsmError::SsTable(SsTableError::InvalidFormat(
+                "Failed to add key-value pair to new block".to_string(),
+            )));
+        }
 
         self.first_key.set_from_slice(key);
         self.last_key.set_from_slice(key);
+        Ok(())
     }
 
     /// Get the estimated size of the SSTable.
@@ -99,7 +105,7 @@ impl SsTableBuilder {
         block_cache: Option<Arc<BlockCache>>,
         path: impl AsRef<Path>,
     ) -> Result<SsTable> {
-        self.finish_block();
+        self.finish_block()?;
         let mut buf = self.data;
         let meta_offset = buf.len();
         BlockMeta::encode_block_meta(&self.meta, self.max_ts, &mut buf);
@@ -121,8 +127,18 @@ impl SsTableBuilder {
             block_meta_offset: meta_offset,
             id,
             block_cache,
-            first_key: self.meta.first().unwrap().first_key.clone(),
-            last_key: self.meta.last().unwrap().last_key.clone(),
+            first_key: self
+                .meta
+                .first()
+                .ok_or(LsmError::SsTable(SsTableError::EmptyTable))?
+                .first_key
+                .clone(),
+            last_key: self
+                .meta
+                .last()
+                .ok_or(LsmError::SsTable(SsTableError::EmptyTable))?
+                .last_key
+                .clone(),
             block_meta: self.meta,
             bloom: Some(bloom),
             max_ts: self.max_ts,
@@ -137,13 +153,13 @@ impl SsTableBuilder {
     }
 
     /// 将当前 block 写入到 data 中，并更新 meta
-    fn finish_block(&mut self) {
+    fn finish_block(&mut self) -> LsmResult<()> {
         // std::mem::replace 返回的是旧的，旧的地址是新的内容
         let builder = std::mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
         let encoded_block = builder
-            .build()
+            .build()?
             .encode(self.compression_options)
-            .expect("Block encoding failed");
+            .map_err(|e| LsmError::SsTable(SsTableError::InvalidFormat(e.to_string())))?;
         self.meta.push(BlockMeta {
             offset: self.data.len(),
             // 返回之前的值，地址置为默认值
@@ -153,5 +169,6 @@ impl SsTableBuilder {
         let checksum = crc32fast::hash(&encoded_block);
         self.data.extend(encoded_block);
         self.data.put_u32(checksum);
+        Ok(())
     }
 }

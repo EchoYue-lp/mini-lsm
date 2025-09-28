@@ -953,7 +953,7 @@ impl LsmStorageInner {
                 ));
             }
             let builder_inner = builder.as_mut().unwrap();
-            builder_inner.add(iter.key(), iter.value());
+            builder_inner.add(iter.key(), iter.value())?;
 
             if !same_as_last_key {
                 last_key.clear();

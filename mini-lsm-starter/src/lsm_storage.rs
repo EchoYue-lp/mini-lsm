@@ -661,13 +661,13 @@ impl LsmStorageInner {
         for record in batch {
             match record {
                 WriteBatchRecord::Put(key, value) => {
-                    txn.put(key.as_ref(), value.as_ref());
+                    txn.put(key.as_ref(), value.as_ref())?;
                 }
                 WriteBatchRecord::Del(key) => {
-                    txn.delete(key.as_ref());
+                    txn.delete(key.as_ref())?;
                 }
                 WriteBatchRecord::PutWithTtl(key, value, ttl) => {
-                    txn.put_with_ttl(key.as_ref(), value.as_ref(), *ttl);
+                    txn.put_with_ttl(key.as_ref(), value.as_ref(), *ttl)?;
                 }
             }
         }

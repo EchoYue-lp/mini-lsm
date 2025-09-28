@@ -48,7 +48,7 @@ pub struct Transaction {
 impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         if self.committed.load(Ordering::SeqCst) {
-            panic!("cannot operate on committed txn!");
+            bail!("cannot operate on committed transaction");
         }
 
         if let Some(guard) = &self.key_hashes {
@@ -84,7 +84,7 @@ impl Transaction {
 
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
         if self.committed.load(Ordering::SeqCst) {
-            panic!("cannot operate on committed txn!");
+            bail!("cannot operate on committed transaction");
         }
         let mut local_iter = TxnLocalIteratorBuilder {
             map: self.local_storage.clone(),
@@ -104,9 +104,9 @@ impl Transaction {
         )
     }
 
-    pub fn put(&self, key: &[u8], value: &[u8]) {
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         if self.committed.load(Ordering::SeqCst) {
-            panic!("cannot operate on committed txn!");
+            bail!("cannot operate on committed transaction");
         }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
@@ -117,12 +117,13 @@ impl Transaction {
             let (write_hashes, _) = &mut *key_hashes;
             write_hashes.insert(farmhash::hash32(key));
         }
+        Ok(())
     }
 
-    pub fn put_with_ttl(&self, key: &[u8], value: &[u8], ttl_secs: u64) {
+    pub fn put_with_ttl(&self, key: &[u8], value: &[u8], ttl_secs: u64) -> Result<()> {
         // Record value in local storage and TTL in a side map
         if self.committed.load(Ordering::SeqCst) {
-            panic!("cannot operate on committed txn!");
+            bail!("cannot operate on committed transaction");
         }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
@@ -131,8 +132,7 @@ impl Transaction {
         } else {
             crate::key::current_timestamp().saturating_add(ttl_secs)
         };
-        self.ttls
-            .insert(Bytes::copy_from_slice(key), expire_at);
+        self.ttls.insert(Bytes::copy_from_slice(key), expire_at);
         // Ensure it's not considered a delete
         self.delete_keys.lock().remove(&Bytes::copy_from_slice(key));
         if let Some(key_hashes) = &self.key_hashes {
@@ -140,11 +140,12 @@ impl Transaction {
             let (write_hashes, _) = &mut *key_hashes;
             write_hashes.insert(farmhash::hash32(key));
         }
+        Ok(())
     }
 
-    pub fn delete(&self, key: &[u8]) {
+    pub fn delete(&self, key: &[u8]) -> Result<()> {
         if self.committed.load(Ordering::SeqCst) {
-            panic!("cannot operate on committed txn!");
+            bail!("cannot operate on committed transaction");
         }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::new());
@@ -156,6 +157,7 @@ impl Transaction {
             let (write_hashes, _) = &mut *key_hashes;
             write_hashes.insert(farmhash::hash32(key));
         }
+        Ok(())
     }
 
     pub fn commit(&self) -> Result<()> {
@@ -192,23 +194,17 @@ impl Transaction {
             .iter()
             .map(|entry| {
                 if self.delete_keys.lock().contains(entry.key()) {
-                    let rec = WriteBatchRecord::Del(entry.key().clone());
-                    rec
+                    WriteBatchRecord::Del(entry.key().clone())
                 } else {
                     // If a TTL is recorded for this key, use PutWithTtl
                     if let Some(ttl_entry) = self.ttls.get(entry.key()) {
-                        let rec = WriteBatchRecord::PutWithTtl(
+                        WriteBatchRecord::PutWithTtl(
                             entry.key().clone(),
                             entry.value().clone(),
                             *ttl_entry.value(),
-                        );
-                        rec
+                        )
                     } else {
-                        let rec = WriteBatchRecord::Put(
-                            entry.key().clone(),
-                            entry.value().clone(),
-                        );
-                        rec
+                        WriteBatchRecord::Put(entry.key().clone(), entry.value().clone())
                     }
                 }
             })

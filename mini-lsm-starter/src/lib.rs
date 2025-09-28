@@ -15,7 +15,10 @@
 pub mod block;
 pub mod compact;
 pub mod compression;
+pub mod connection_pool;
 pub mod debug;
+pub mod error;
+pub mod hybrid_async_interface;
 pub mod iterators;
 pub mod key;
 pub mod lsm_iterator;
@@ -23,6 +26,7 @@ pub mod lsm_storage;
 pub mod manifest;
 pub mod mem_table;
 pub mod mvcc;
+pub mod network_server;
 pub mod table;
 pub mod wal;
 

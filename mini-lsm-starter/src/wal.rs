@@ -4,6 +4,7 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::error::{LsmError, WalError};
 use anyhow::{Context, Result, bail};
 use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
@@ -72,13 +73,23 @@ impl Wal {
             rbuf.advance(batch_size);
             let expected_checksum = rbuf.get_u32();
             let component_checksum = hasher.finalize();
-            assert_eq!(component_checksum, single_checksum);
+            if component_checksum != single_checksum {
+                return Err(LsmError::Wal(WalError::ChecksumMismatch {
+                    expected: single_checksum,
+                    actual: component_checksum,
+                })
+                .into());
+            }
             if single_checksum != expected_checksum {
-                bail!("checksum mismatch");
+                return Err(LsmError::Wal(WalError::ChecksumMismatch {
+                    expected: expected_checksum,
+                    actual: single_checksum,
+                })
+                .into());
             }
             for (key, ts, key_type_byte, ttl, value) in kv_pairs {
-                let key_type =
-                    crate::key::Type::try_from(key_type_byte).unwrap_or(crate::key::Type::PUT);
+                let key_type = crate::key::Type::try_from(key_type_byte)
+                    .map_err(|_| LsmError::Wal(WalError::InvalidKeyType(key_type_byte)))?;
                 let key_bytes = KeyBytes::from_bytes_with_all(key, ts, key_type, ttl);
                 skiplist.insert(key_bytes, value);
             }
